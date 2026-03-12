@@ -1,0 +1,45 @@
+{
+  "agents": [
+    {
+      "name": "main",
+      "enabled": true,
+      "in_pipeline": true,
+      "role": "orchestrator",
+      "heartbeat_enabled": true,
+      "heartbeat_mode": "strict",
+      "shortcut": "main"
+    },
+    {
+      "name": "builder_ai",
+      "enabled": true,
+      "in_pipeline": true,
+      "role": "builder",
+      "heartbeat_enabled": true,
+      "heartbeat_mode": "standard",
+      "shortcut": "build"
+    }
+  ],
+  "tracked_paths": [
+    "/home/joseph-ding/.openclaw/workspace/memory",
+    "/home/joseph-ding/.openclaw/workspace/MEMORY.md"
+  ],
+  "pipeline": {
+    "judge_enabled": true,
+    "embedding_enabled": true,
+    "auto_promote_enabled": true,
+    "pending_stable_required": true
+  },
+  "heartbeat": {
+    "heartbeat_enabled": true,
+    "heartbeat_mode": "strict",
+    "heartbeat_interval_seconds": 300,
+    "heartbeat_file": "/home/joseph-ding/.openclaw/workspace/HEARTBEAT.md",
+    "heartbeat_agent_file": "/home/joseph-ding/.openclaw/workspace/HEARTBEAT_AGENTS.md"
+  },
+  "commands": {
+    "maintenance_cycle": "python3 /home/joseph-ding/.openclaw/workspace/.memory-index/scripts/run_memory_maintenance_cycle.py",
+    "embed_active": "python3 /home/joseph-ding/.openclaw/workspace/.memory-index/scripts/embed_memory_items.py --batch-size 64",
+    "sync_markdown": "python3 /home/joseph-ding/.openclaw/workspace/.memory-index/scripts/sync_registry_to_markdown.py",
+    "show_queue": "python3 /home/joseph-ding/.openclaw/workspace/.memory-index/scripts/show_review_queue.py --limit 20"
+  }
+}

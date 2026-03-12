@@ -1,0 +1,70 @@
+{
+  "captured_at": "2026-03-11T16:19:48Z",
+  "workspace": "/home/joseph-ding/.openclaw/workspace",
+  "summary_count": 4,
+  "summaries": [
+    {
+      "scope": "project",
+      "category": "memory_system",
+      "text": "Memory-system/project infrastructure files changed in 4 path(s).",
+      "evidence": [
+        ".memory-index/",
+        "MEMORY.md",
+        "memory/",
+        "openclaw_memory_project.tar.gz"
+      ]
+    },
+    {
+      "scope": "daily",
+      "category": "docs",
+      "text": "Documentation/instruction files changed in 8 path(s).",
+      "evidence": [
+        "AGENTS.md",
+        "BOOT.md",
+        "BOOTSTRAP.md",
+        "HEARTBEAT.md",
+        "IDENTITY.md",
+        "SOUL.md",
+        "TOOLS.md",
+        "USER.md"
+      ]
+    },
+    {
+      "scope": "daily",
+      "category": "untracked",
+      "text": "15 untracked file/path entries are present in the workspace snapshot.",
+      "evidence": [
+        ".memory-index/",
+        ".openclaw/",
+        "AGENTS.md",
+        "BOOT.md",
+        "BOOTSTRAP.md",
+        "HEARTBEAT.md",
+        "IDENTITY.md",
+        "MEMORY.md",
+        "SOUL.md",
+        "TOOLS.md",
+        "USER.md",
+        "knowledge_base",
+        "memory/",
+        "openclaw_memory_project.tar.gz",
+        "project_file_list.txt"
+      ]
+    },
+    {
+      "scope": "daily",
+      "category": "top_dirs",
+      "text": "Top directories/files touched: .memory-index (1), .openclaw (1), AGENTS.md (1), BOOT.md (1), BOOTSTRAP.md (1), HEARTBEAT.md (1), IDENTITY.md (1), MEMORY.md (1)",
+      "evidence": [
+        ".memory-index (1)",
+        ".openclaw (1)",
+        "AGENTS.md (1)",
+        "BOOT.md (1)",
+        "BOOTSTRAP.md (1)",
+        "HEARTBEAT.md (1)",
+        "IDENTITY.md (1)",
+        "MEMORY.md (1)"
+      ]
+    }
+  ]
+}

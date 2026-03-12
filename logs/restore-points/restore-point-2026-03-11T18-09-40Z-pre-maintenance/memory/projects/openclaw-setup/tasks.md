@@ -1,0 +1,5 @@
+- Create stable memory structure
+- Add daily logs
+- Add project-specific memory
+- Build local vector-backed retrieval
+- Add forced recall and writeback policy

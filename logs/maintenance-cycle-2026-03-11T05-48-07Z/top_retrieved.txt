@@ -1,0 +1,3 @@
+=== TOP RETRIEVED ITEMS ===
+
+canon-browser-0001: selected=4 useful=2 bad=0

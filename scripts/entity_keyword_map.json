@@ -1,0 +1,7 @@
+{
+  "browser": ["browser", "devtools", "cdp", "vnc"],
+  "gateway": ["gateway"],
+  "worker": ["worker", "upload api", "couchdb"],
+  "checkpoint_pipeline": ["checkpoint", "memory pipeline", "canonical memory", "registry"],
+  "user_preference": ["prefers", "preference", "likes", "dislikes", "wants"]
+}

@@ -1,0 +1,3 @@
+- Tested headless browser through Browserless
+- Tested visible browser through VNC + forwarded CDP
+- Tested OpenClaw browser snapshots on both profiles

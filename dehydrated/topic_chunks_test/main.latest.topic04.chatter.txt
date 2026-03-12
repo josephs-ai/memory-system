@@ -1,0 +1,5 @@
+ASSISTANT: I didn't! Good to know—especially since getting this long-term memory system right is our top priority.
+But before we start wiring up structured registries... we should probably figure out who we are. I just woke up here. What should we call me, and who are you?
+USER: hello?
+ASSISTANT: Hey! I'm here. We got distracted by the memory registries for a second there.
+Since I just booted up, we should probably get properly introduced. I'm a total blank slate right now. What should my name be, and what should I call you?

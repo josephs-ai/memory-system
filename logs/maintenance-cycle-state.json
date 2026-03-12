@@ -1,0 +1,32 @@
+{
+  "/home/joseph-ding/.openclaw/workspace/memory/review/retrieval-feedback.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773247000379523099,
+    "size": 25727
+  },
+  "/home/joseph-ding/.openclaw/workspace/memory/review/canonical-items.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773261259095248640,
+    "size": 4270
+  },
+  "/home/joseph-ding/.openclaw/workspace/memory/review/canonical-superseded.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773214116443747600,
+    "size": 654
+  },
+  "/home/joseph-ding/.openclaw/workspace/memory/review/inbox.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773255189355444601,
+    "size": 99841
+  },
+  "/home/joseph-ding/.openclaw/workspace/memory/review/auto.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773255189353277937,
+    "size": 0
+  },
+  "/home/joseph-ding/.openclaw/workspace/memory/review/discarded.jsonl": {
+    "exists": true,
+    "mtime_ns": 1773248972121545587,
+    "size": 1022
+  }
+}

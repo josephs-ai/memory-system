@@ -1,0 +1,53 @@
+{
+  "builder": {
+    "last_refresh_ts": 1773219942.478268,
+    "last_refresh_at": "2026-03-11T09:05:42Z",
+    "interval_seconds": 300,
+    "files": [
+      "/home/joseph-ding/.openclaw/workspace/memory/browser.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/worker.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/gateway.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/learned-fixes.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/memory-system.md"
+    ]
+  },
+  "artist": {
+    "last_refresh_ts": 1773219947.437736,
+    "last_refresh_at": "2026-03-11T09:05:47Z",
+    "interval_seconds": 900,
+    "files": [
+      "/home/joseph-ding/.openclaw/workspace/memory/preferences.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/memory-system.md"
+    ]
+  },
+  "builder_ai": {
+    "last_refresh_ts": 1773252530.696485,
+    "last_refresh_at": "2026-03-11T18:08:50Z",
+    "interval_seconds": 300,
+    "project_id": "game-ai-combat",
+    "event_files": {
+      "/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/current.md": 1773252526.194038,
+      "/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/daily/2026-03-11.md": 1773241480.671838,
+      "/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/latest-workspace-summary.json": 1773245988.0860074
+    },
+    "refresh_trigger": "event",
+    "files": [
+      "/home/joseph-ding/.openclaw/workspace/memory/browser.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/worker.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/gateway.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/learned-fixes.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/memory-system.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/current.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/daily/2026-03-11.md"
+    ]
+  },
+  "concept_artist": {
+    "last_refresh_ts": 1773222411.319204,
+    "last_refresh_at": "2026-03-11T09:46:51Z",
+    "interval_seconds": 900,
+    "files": [
+      "/home/joseph-ding/.openclaw/workspace/memory/preferences.md",
+      "/home/joseph-ding/.openclaw/workspace/memory/memory-system.md"
+    ]
+  }
+}

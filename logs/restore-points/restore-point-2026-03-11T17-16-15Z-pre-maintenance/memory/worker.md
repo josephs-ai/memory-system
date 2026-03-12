@@ -1,0 +1,7 @@
+- Worker Tailscale IP: 100.124.217.55
+- Browserless port: 9222
+- Visible browser forwarded DevTools port: 9224
+- Upload API port: 8001
+- CouchDB port: 5984
+- VNC port: 5902
+- Worker provides browser automation, upload API, CouchDB, and VNC services

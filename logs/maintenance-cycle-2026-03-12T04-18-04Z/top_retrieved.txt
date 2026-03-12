@@ -1,0 +1,10 @@
+=== TOP RETRIEVED ITEMS ===
+
+mem-90322abb68e1: selected=22 useful=0 bad=0 status=active
+  text=Canonical memory now uses a structured registry for active items instead of inferring item fields from markdown bullets.
+canon-browser-0001: selected=5 useful=3 bad=0 status=active
+  text=Native browser tool access may be restricted in-session, but browser control still works through openclaw browser CLI against the forward...
+canon-browser-0002: selected=1 useful=0 bad=1 status=active
+  text=Visible browser state is managed through the forwarded DevTools port 9224.
+mem-58596b3583f93e8546c4ca0fa270cc23ef89dea8: selected=1 useful=1 bad=0 status=active
+  text=Canonical registry requires explicit approval for high-importance stable memories.

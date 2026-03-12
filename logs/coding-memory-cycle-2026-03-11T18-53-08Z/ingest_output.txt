@@ -1,0 +1,7 @@
+PROJECT_ID=game-ai-combat
+PROJECT_LINES=1
+DAILY_LINES=3
+PROJECT_WRITTEN=0
+DAILY_WRITTEN=0
+PROJECT_FILE=/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/current.md
+DAILY_FILE=/home/joseph-ding/.openclaw/workspace/memory/projects/game-ai-combat/daily/2026-03-11.md
