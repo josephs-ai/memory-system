@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from live_status import get_live_status
 import os
 import subprocess
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from fastapi import Form
 
 from config import DEFAULT_PORT, HEARTBEAT_MODES, PROJECTS_DIR, ROLE_OPTIONS, WORKSPACE
 from data_architecture import ARCHITECTURE_CROSS_EDGES, ARCHITECTURE_TREES
@@ -88,6 +90,7 @@ def render(request: Request, title: str, page: str, **extra):
         "title": title,
         "page": page,
         "config": cfg,
+        "live_status": get_live_status(),
         "default_port": DEFAULT_PORT,
         "role_options": ROLE_OPTIONS,
         "heartbeat_modes": HEARTBEAT_MODES,
@@ -311,5 +314,66 @@ def run_command(command_name: str = Form(...)):
         f"STDERR:\n{proc.stderr}\n"
         f"RETURN CODE: {proc.returncode}"
     )
+
+@router.post("/conflicts/demote")
+
+def conflict_demote(item_id: str = Form(...)):
+    global LAST_OUTPUT, LAST_STATUS, LAST_RUN_AT
+
+    cmd = (
+        f"{WORKSPACE / '.openclaw' / 'venvs' / 'memory-db' / 'bin' / 'python'} "
+        f"{SCRIPTS_DIR / 'demote_memory_item.py'} --item-id {item_id}"
+    )
+
+    proc = subprocess.run(
+        cmd,
+        shell=True,
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+
+    LAST_STATUS = "success" if proc.returncode == 0 else "error"
+    LAST_RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    LAST_OUTPUT = (
+        f"$ {cmd}\n\n"
+        f"STDOUT:\n{proc.stdout}\n"
+        f"STDERR:\n{proc.stderr}\n"
+        f"RETURN CODE: {proc.returncode}"
+    )
+
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/conflicts/restore")
+def conflict_restore(item_id: str = Form(...)):
+    global LAST_OUTPUT, LAST_STATUS, LAST_RUN_AT
+
+    cmd = (
+        f"{Path.home() / '.openclaw' / 'venvs' / 'memory-db' / 'bin' / 'python'} "
+        f"{SCRIPTS_DIR / 'restore_memory_item.py'} --item-id {item_id}"
+    )
+
+    proc = subprocess.run(
+        cmd,
+        shell=True,
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+
+    LAST_STATUS = "success" if proc.returncode == 0 else "error"
+    LAST_RUN_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    LAST_OUTPUT = (
+        f"$ {cmd}\n\n"
+        f"STDOUT:\n{proc.stdout}\n"
+        f"STDERR:\n{proc.stderr}\n"
+        f"RETURN CODE: {proc.returncode}"
+    )
+
+    return RedirectResponse(url="/", status_code=303)
+
 
     return RedirectResponse(url="/commands", status_code=303)

@@ -85,6 +85,119 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
         </div>
       </div>
     </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="card span-4">
+        <h2>Memory flow monitor</h2>
+        <p class="muted">Live queue counts and recent memory movement.</p>
+        <p>
+          <span class="pill gray">Inbox: {{ live_status.queues.inbox }}</span>
+          <span class="pill gray">Pending stable: {{ live_status.queues.pending_stable }}</span>
+          <span class="pill gray">Canonical: {{ live_status.queues.canonical_active }}</span>
+          <span class="pill gray">Discarded: {{ live_status.queues.discarded }}</span>
+        </p>
+
+        <h3>Recent inbox</h3>
+        <ul class="clean">
+          {% for item in live_status.recent_memory.inbox %}
+          <li><code>{{ item.id }}</code><br>{{ item.text[:120] }}{% if item.text|length > 120 %}...{% endif %}</li>
+          {% else %}
+          <li>No recent inbox items.</li>
+          {% endfor %}
+        </ul>
+
+
+        <h3 style="margin-top:12px;">Recent canonical</h3>
+        <ul class="clean">
+          {% for item in live_status.recent_memory.canonical %}
+          <li><code>{{ item.id }}</code><br>{{ item.text[:120] }}{% if item.text|length > 120 %}...{% endif %}</li>
+          {% else %}
+          <li>No recent canonical items.</li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <div class="card span-4">
+        <h2>Conflict resolution</h2>
+        <p class="muted">Potential conflicts detected from multiple active canonical variants sharing the same entity + property.</p>
+
+        <ul class="clean">
+          {% for row in live_status.conflicts %}
+          <li>
+            <strong>{{ row.entity }}</strong> / <strong>{{ row.property }}</strong><br>
+            <span class="pill gray">variants: {{ row.variants }}</span>
+
+            <ul class="clean" style="margin-top:8px;">
+              {% for item in row["items"] %}
+              <li>
+                <code>{{ item.id }}</code><br>
+                {{ item.text[:100] }}{% if item.text|length > 100 %}...{% endif %}<br>
+                <span class="pill gray">confidence: {{ item.confidence }}</span>
+                <span class="pill gray">importance: {{ item.importance }}</span>
+
+                <div class="actions" style="margin-top:8px;">
+                  <form method="post" action="/conflicts/demote">
+                    <input type="hidden" name="item_id" value="{{ item.id }}">
+                    <button type="submit">Demote</button>
+                  </form>
+                  <form method="post" action="/conflicts/restore">
+                    <input type="hidden" name="item_id" value="{{ item.id }}">
+                    <button type="submit">Restore</button>
+                  </form>
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+          </li>
+          {% else %}
+          <li>No active conflicts detected.</li>
+          {% endfor %}
+        </ul>
+
+
+        <p class="muted" style="margin-top:12px;">
+          This is phase 1: visibility. The next upgrade is one-click judge/promote/demote actions from the panel.
+        </p>
+      </div>
+
+      <div class="card span-4">
+        <h2>Heartbeat monitor</h2>
+        <p>
+          {% if live_status.heartbeat.healthy %}
+          <span class="pill success">healthy pulse</span>
+          {% elif live_status.heartbeat.warning %}
+          <span class="pill gray">stale warning</span>
+          {% else %}
+          <span class="pill error">critical / no pulse</span>
+          {% endif %}
+        </p>
+
+        <p class="muted">
+          Stale seconds: {{ live_status.heartbeat.stale_seconds if live_status.heartbeat.stale_seconds is not none else "unknown" }}
+        </p>
+
+        <ul class="clean">
+          <li>
+            <strong>HEARTBEAT.md</strong><br>
+            <span class="muted">{{ live_status.heartbeat.heartbeat_file_mtime or "missing" }}</span>
+          </li>
+          <li>
+            <strong>HEARTBEAT_AGENTS.md</strong><br>
+            <span class="muted">{{ live_status.heartbeat.heartbeat_agent_file_mtime or "missing" }}</span>
+          </li>
+          <li>
+            <strong>decisions.log</strong><br>
+            <span class="muted">{{ live_status.heartbeat.decisions_log_mtime or "missing" }}</span>
+          </li>
+        </ul>
+
+
+        <p class="muted" style="margin-top:12px;">
+          This is phase 1 health visibility. Next step is staleness thresholds and warning colors.
+        </p>
+      </div>
+    </div>
+
     {% endif %}
 
     {% if page == "agents" %}
@@ -396,6 +509,15 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
     window.OPENCLAW_ARCH_NODE_IDS = [{% for node_id in architecture_details.keys() %}"{{ node_id }}"{% if not loop.last %}, {% endif %}{% endfor %}];
   </script>
   {% endif %}
+
+{% if page == "overview" %}
+<script>
+  setTimeout(() => {
+    window.location.reload();
+  }, 15000);
+</script>
+{% endif %}
+
 </body>
 </html>
 EOF
