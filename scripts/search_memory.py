@@ -1,21 +1,50 @@
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from memory_db import hybrid_search_memory_items, close_pool
+from vector_store_qdrant import search_memory_vectors
+from extract_memory_fields import extract_fields
+from graph_store_neo4j import get_neo4j_driver
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-float(x)))
+
+
+def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
+    if not rows:
+        return rows
+
+    rows.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
+
+    head = rows[:top_n]
+    tail = rows[top_n:]
+
+    model = CrossEncoder(RERANK_MODEL_NAME)
+    pairs = [[query, row["text"]] for row in head]
+    raw_scores = model.predict(pairs)
+
+    for row, raw in zip(head, raw_scores):
+        row["rerank_raw"] = float(raw)
+        row["rerank_score"] = sigmoid(float(raw))
+        row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
+
+    head.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
+    return head + tail
 
 def collect_project_sources(project_id: str | None):
     if not project_id:
@@ -64,6 +93,63 @@ def collect_project_sources(project_id: str | None):
                 }
 
 
+def search_graph_memory(entity: str | None, prop: str | None) -> list[dict]:
+    if not entity and not prop:
+        return []
+
+    driver = get_neo4j_driver()
+    out = []
+
+    with driver.session() as session:
+        if entity and prop:
+            rows = session.run(
+                """
+                MATCH (e:Entity {name: $entity})-[:HAS_PROPERTY]->(p:Property {key: $property})-[:HAS_VALUE]->(v:Value)
+                RETURN e.name AS entity, p.key AS property, v.key AS value
+                ORDER BY value
+                LIMIT 10
+                """,
+                entity=entity,
+                property=prop,
+            )
+        elif entity:
+            rows = session.run(
+                """
+                MATCH (e:Entity {name: $entity})-[:HAS_PROPERTY]->(p:Property)-[:HAS_VALUE]->(v:Value)
+                RETURN e.name AS entity, p.key AS property, v.key AS value
+                ORDER BY property, value
+                LIMIT 10
+                """,
+                entity=entity,
+            )
+        else:
+            rows = session.run(
+                """
+                MATCH (e:Entity)-[:HAS_PROPERTY]->(p:Property {key: $property})-[:HAS_VALUE]->(v:Value)
+                RETURN e.name AS entity, p.key AS property, v.key AS value
+                ORDER BY entity, value
+                LIMIT 10
+                """,
+                property=prop,
+            )
+
+        for row in rows:
+            out.append(
+                {
+                    "entity": row["entity"],
+                    "property": row["property"],
+                    "value": row["value"],
+                    "text": (
+                        f"{str(row['entity']).replace('_', ' ')} "
+                        f"{str(row['property']).replace('_', ' ')} is "
+                        f"{str(row['value']).replace('_', ' ')}."
+                    ),
+                }
+            )
+
+    driver.close()
+    return out
+
 def simple_project_score(query: str, text: str, source_type: str) -> float:
     q_terms = [x.lower() for x in query.split() if x.strip()]
     t = (text or "").lower()
@@ -94,8 +180,14 @@ def main():
         normalize_embeddings=True,
         convert_to_numpy=True,
     )
-
     scored = []
+    seen = set()
+
+    query_fields = extract_fields(args.query)
+    graph_hits = search_graph_memory(
+        query_fields.get("entity"),
+        query_fields.get("property"),
+    )
 
     canonical_items = hybrid_search_memory_items(
         query_embedding,
@@ -106,12 +198,58 @@ def main():
     )
 
     for item in canonical_items:
+        text = item.get("text", "")
+        seen.add(text)
         scored.append(
             {
                 "score": float(item.get("final_score", 0) or 0) + 0.10,
                 "source_type": "canonical",
                 "path": "db:memory_items",
-                "text": item.get("text", ""),
+                "text": text,
+                "mtime": float("inf"),
+            }
+        )
+
+    qdrant_hits = search_memory_vectors(query_embedding, limit=20)
+
+    for hit in qdrant_hits:
+        payload = hit.payload or {}
+        text = payload.get("text") or ""
+        if not text or text in seen:
+            continue
+
+        seen.add(text)
+        scored.append(
+            {
+                "score": float(hit.score or 0.0) + 0.20,
+                "source_type": "canonical_qdrant",
+                "path": "qdrant:memory_items",
+                "text": text,
+                "mtime": float("inf"),
+            }
+        )
+
+    query_entity = query_fields.get("entity")
+    query_property = query_fields.get("property")
+
+    for hit in graph_hits:
+        text = hit["text"]
+        if not text or text in seen:
+            continue
+
+        score = 0.55
+        if hit.get("entity") == query_entity:
+            score += 0.15
+        if hit.get("property") == query_property:
+            score += 0.20
+
+        seen.add(text)
+        scored.append(
+            {
+                "score": score,
+                "source_type": "canonical_graph",
+                "path": "neo4j:memory_graph",
+                "text": text,
                 "mtime": float("inf"),
             }
         )
@@ -123,7 +261,7 @@ def main():
             row["score"] = float(score)
             scored.append(row)
 
-    scored.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
+    scored = rerank_rows(args.query, scored, top_n=min(12, len(scored)))
 
     if not scored:
         print("NONE")

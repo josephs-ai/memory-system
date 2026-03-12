@@ -795,15 +795,48 @@ def fetch_memory_items_for_embedding(status: str = "active"):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, text
+                SELECT
+                    id,
+                    text,
+                    memory_type,
+                    scope,
+                    entity,
+                    property,
+                    value,
+                    status,
+                    confidence,
+                    importance,
+                    freshness_class,
+                    source_agent,
+                    source_session,
+                    source_chunk
                 FROM memory_items
                 WHERE status = %s
                 ORDER BY id
                 """,
                 (status,),
             )
-            return [{"id": row[0], "text": row[1]} for row in cur.fetchall()]
 
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "text": row[1],
+                    "memory_type": row[2],
+                    "scope": row[3],
+                    "entity": row[4],
+                    "property": row[5],
+                    "value": row[6],
+                    "status": row[7],
+                    "confidence": row[8],
+                    "importance": row[9],
+                    "freshness_class": row[10],
+                    "source_agent": row[11],
+                    "source_session": row[12],
+                    "source_chunk": row[13],
+                }
+                for row in rows
+            ]
 
 def hybrid_search_memory_items(
     query_embedding,
