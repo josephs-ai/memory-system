@@ -10,6 +10,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from memory_db import fetch_memory_items_for_embedding, upsert_memory_embedding, close_pool
+from vector_store_qdrant import ensure_qdrant_collection, upsert_memory_vector
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -36,6 +37,7 @@ def main():
 
     device = choose_device(args.device)
     model = SentenceTransformer(MODEL_NAME, device=device)
+    ensure_qdrant_collection()
 
     items = fetch_memory_items_for_embedding(args.status)
 
@@ -58,7 +60,31 @@ def main():
         )
 
         for item, emb in zip(batch, embeddings):
-            upsert_memory_embedding(item["id"], MODEL_NAME, emb.tolist())
+            vector = emb.tolist()
+
+            upsert_memory_embedding(item["id"], MODEL_NAME, vector)
+
+            upsert_memory_vector(
+                memory_id=item["id"],
+                vector=vector,
+                payload={
+                    "id": item["id"],
+                    "text": item.get("text"),
+                    "memory_type": item.get("memory_type"),
+                    "scope": item.get("scope"),
+                    "entity": item.get("entity"),
+                    "property": item.get("property"),
+                    "value": item.get("value"),
+                    "status": item.get("status"),
+                    "confidence": item.get("confidence"),
+                    "importance": item.get("importance"),
+                    "freshness_class": item.get("freshness_class"),
+                    "source_agent": item.get("source_agent"),
+                    "source_session": item.get("source_session"),
+                    "source_chunk": item.get("source_chunk"),
+                },
+            )
+
             embedded += 1
 
         print(f"PROGRESS {embedded}/{total}")

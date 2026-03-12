@@ -40,10 +40,21 @@ def extract_fields(text: str):
         entity = "checkpoint_pipeline"
         tags += ["memory-system"]
 
-        if "policy" in t:
+        if "stable promotion policy" in t or ("stable" in t and "promotion" in t and "policy" in t):
+            prop = "stable_promotion_policy"
+            tags += ["policy", "stable-promotion"]
+
+        elif "canonical memory backend" in t or ("canonical" in t and "backend" in t) or ("registry" in t and "backend" in t):
+            prop = "canonical_memory_backend"
+            tags += ["architecture", "backend"]
+
+        elif "processing capability" in t or ("cross-agent" in t) or ("cross agent" in t):
+            prop = "processing_capability"
+            tags += ["capability", "cross-agent"]
+
+        elif "policy" in t:
             prop = "policy"
             tags += ["policy"]
-
     # Browser
     elif "browser" in t or "devtools" in t or "cdp" in t or "chromium" in t:
         entity = "browser"

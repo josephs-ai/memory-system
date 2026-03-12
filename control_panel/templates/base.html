@@ -16,6 +16,7 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
       <a class="nav-link {% if page=='projects' or page=='project_detail' %}active{% endif %}" href="/projects">Projects</a>
       <a class="nav-link {% if page=='architecture' or page=='architecture_node' %}active{% endif %}" href="/architecture">Memory Graph</a>
       <a class="nav-link {% if page=='commands' %}active{% endif %}" href="/commands">Commands</a>
+      <a class="nav-link {{ "active" if page == "search" else "" }}" href="/search">Search</a>
     </div>
 
     <div class="hero">
@@ -198,6 +199,39 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
       </div>
     </div>
 
+    {% endif %}
+
+    {% if page == "search" %}
+    <div class="grid">
+      <div class="card span-12">
+        <h2>Hybrid Memory Search</h2>
+        <form method="post" action="/search">
+          <div class="form-row">
+            <div class="col-12">
+              <label>Query</label>
+              <input type="text" name="query" value="{{ search_query or '' }}" placeholder="checkpoint pipeline stable promotion policy" required>
+            </div>
+          </div>
+          <button class="primary" type="submit">Run search</button>
+        </form>
+      </div>
+
+      <div class="card span-12">
+        <h2>Results</h2>
+        <ul class="clean">
+          {% for row in search_results %}
+          <li>
+            <span class="pill gray">{{ row.source_type }}</span>
+            <span class="pill gray">{{ "%.3f"|format(row.score) }}</span><br>
+            <code>{{ row.path }}</code><br>
+            {{ row.text }}
+          </li>
+          {% else %}
+          <li>No results yet.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
     {% endif %}
 
     {% if page == "agents" %}

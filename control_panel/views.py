@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi import Form
 
-from config import DEFAULT_PORT, HEARTBEAT_MODES, PROJECTS_DIR, ROLE_OPTIONS, WORKSPACE
+from config import DEFAULT_PORT, HEARTBEAT_MODES, PROJECTS_DIR, ROLE_OPTIONS, WORKSPACE, SCRIPTS_DIR
 from data_architecture import ARCHITECTURE_CROSS_EDGES, ARCHITECTURE_TREES
 
 from datetime import datetime, timezone
@@ -345,6 +345,65 @@ def conflict_demote(item_id: str = Form(...)):
 
     return RedirectResponse(url="/", status_code=303)
 
+@router.get("/search")
+def search_page(request: Request):
+    return render(
+        request,
+        "Memory Search",
+        "search",
+        search_results=[],
+        search_query="",
+    )
+
+
+@router.post("/search")
+def search_run(request: Request, query: str = Form(...)):
+    env = os.environ.copy()
+    env.setdefault("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=joseph-ding")
+    env.setdefault("OPENCLAW_NEO4J_PASSWORD", "neo4jpassword")
+
+    cmd = [
+        str(Path.home() / ".openclaw" / "venvs" / "memory-db" / "bin" / "python"),
+        str(SCRIPTS_DIR / "search_memory.py"),
+        "--query",
+        query,
+    ]
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    results = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line or line == "NONE":
+            continue
+        try:
+            results.append(json.loads(line))
+        except Exception:
+            pass
+
+    if proc.returncode != 0:
+        results = [
+            {
+                "score": 0.0,
+                "source_type": "error",
+                "path": "control_panel:search",
+                "text": (proc.stderr or proc.stdout or "Search failed").strip(),
+            }
+        ]
+
+    return render(
+        request,
+        "Memory Search",
+        "search",
+        search_results=results,
+        search_query=query,
+    )
 
 @router.post("/conflicts/restore")
 def conflict_restore(item_id: str = Form(...)):
