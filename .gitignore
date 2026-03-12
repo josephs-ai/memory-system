@@ -25,12 +25,6 @@ venv/
 .env.*
 
 
-control_panel/neo4j_data/
-
-control_panel/neo4j_data/
-control_panel/qdrant_data/
-*.tar.gz
-*.bak
 
 control_panel/neo4j_data/
 control_panel/qdrant_data/
