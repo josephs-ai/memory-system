@@ -1,0 +1,7 @@
+{
+  "pid": 89105,
+  "started_at": 1773329348,
+  "python": "/home/joseph-ding/.openclaw/venvs/memory-db/bin/python",
+  "watcher_script": "/home/joseph-ding/.openclaw/workspace/.memory-index/scripts/tracked_path_watcher.py",
+  "log_file": "/home/joseph-ding/.openclaw/workspace/.memory-index/tracked_path_watcher.log"
+}

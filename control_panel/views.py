@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import sys
 from live_status import get_live_status
 import os
 import subprocess
 from pathlib import Path
 
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -14,6 +22,8 @@ from config import DEFAULT_PORT, HEARTBEAT_MODES, PROJECTS_DIR, ROLE_OPTIONS, WO
 from data_architecture import ARCHITECTURE_CROSS_EDGES, ARCHITECTURE_TREES
 
 from datetime import datetime, timezone
+
+from checkpoint_db import list_recent_checkpoints, latest_checkpoint
 
 from services import (
     build_mermaid_diagram,
@@ -32,6 +42,23 @@ templates = Jinja2Templates(directory=str((WORKSPACE / ".memory-index" / "contro
 LAST_OUTPUT = ""
 LAST_STATUS = "idle"
 LAST_RUN_AT = ""
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+MEMORY_INDEX = WORKSPACE / ".memory-index"
+SCRIPTS_DIR = MEMORY_INDEX / "scripts"
+PY = str(Path.home() / ".openclaw" / "venvs" / "memory-db" / "bin" / "python")
+
+def services_page_data() -> dict:
+    watcher = run_json_script("tracked_path_watcher_status.py")
+    heartbeat = run_json_script("heartbeat_worker_status.py")
+    search = run_json_script("search_service_status.py")
+    tuning = read_heartbeat_tuning_state()
+    return {
+        "tracked_path_watcher_status": watcher,
+        "heartbeat_worker_status": heartbeat,
+        "search_service_status": search,
+        "heartbeat_tuning_state": tuning,
+    }
 
 def build_architecture_detail_map() -> dict[str, dict]:
     all_nodes = {}
@@ -83,9 +110,100 @@ def build_architecture_detail_map() -> dict[str, dict]:
     return detail_map
 
 
-def render(request: Request, title: str, page: str, **extra):
+def run_json_script(script_name: str) -> dict:
+    script = SCRIPTS_DIR / script_name
+    env = os.environ.copy()
+    env.setdefault("OPENCLAW_MEMORY_DB_DSN", f"dbname=openclaw_memory user={os.environ.get('USER', 'joseph-ding')}")
+    proc = subprocess.run(
+        [PY, str(script)],
+        capture_output=True,
+        text=True,
+        cwd=str(SCRIPTS_DIR),
+        env=env,
+    )
+    text = (proc.stdout or proc.stderr or "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"raw": text, "returncode": proc.returncode}
+
+def read_heartbeat_tuning_state() -> dict:
+    code = (
+        "import sys, json; from pathlib import Path; "
+        "sys.path.insert(0, str(Path.home()/'.openclaw'/'workspace'/'.memory-index'/'scripts')); "
+        "from checkpoint_db import get_state, close_pool; "
+        "print(json.dumps({'heartbeat_tuning': get_state('heartbeat_tuning', {}), 'effective_interval': get_state('heartbeat_effective_interval_seconds', None)})); "
+        "close_pool()"
+    )
+    proc = subprocess.run(
+        [PY, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(SCRIPTS_DIR),
+        env=os.environ.copy(),
+    )
+    try:
+        return json.loads((proc.stdout or "{}").strip())
+    except Exception:
+        return {"heartbeat_tuning": {}, "effective_interval": None}
+
+def _run_json_script(script_name: str) -> dict[str, Any]:
+    cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / script_name),
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "stderr": proc.stderr,
+            "stdout": proc.stdout,
+            "returncode": proc.returncode,
+        }
+    try:
+        return json.loads(proc.stdout)
+    except Exception:
+        return {
+            "status": "invalid_json",
+            "stdout": proc.stdout,
+        }
+
+
+def heartbeat_worker_status_data() -> dict[str, Any]:
+    return _run_json_script("heartbeat_worker_status.py")
+
+
+def tracked_path_watcher_status_data() -> dict[str, Any]:
+    return _run_json_script("tracked_path_watcher_status.py")
+
+
+def checkpoint_page_data(limit: int = 20) -> dict[str, Any]:
+    latest = latest_checkpoint()
+    recent = list_recent_checkpoints(limit=limit)
+    return {
+        "latest_checkpoint": latest,
+        "recent_checkpoints": recent,
+    }
+
+def render(
+    request: Request,
+    title: str,
+    page: str,
+    extra_context: dict | None = None,
+    **kwargs,
+):
     cfg = load_config()
+
     context = {
+        "heartbeat_worker_status": heartbeat_worker_status_data(),
+        "tracked_path_watcher_status": tracked_path_watcher_status_data(),
+        **checkpoint_page_data(),
         "request": request,
         "title": title,
         "page": page,
@@ -99,9 +217,67 @@ def render(request: Request, title: str, page: str, **extra):
         "last_output": LAST_OUTPUT or "No command run yet.",
     }
 
-    context.update(extra)
+    if extra_context:
+        context.update(extra_context)
+    if kwargs:
+        context.update(kwargs)
+
     return templates.TemplateResponse("base.html", context)
 
+def run_stack_command(command: str) -> str:
+    env = os.environ.copy()
+    env.setdefault("OPENCLAW_MEMORY_DB_DSN", f"dbname=openclaw_memory user={os.environ.get('USER', 'joseph-ding')}")
+    proc = subprocess.run(
+        command,
+        shell=True,
+        cwd=str(SCRIPTS_DIR),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+    return out.strip() or f"returncode={proc.returncode}"
+
+
+def run_stack_action(action: str) -> str:
+    actions = {
+        "ensure_memory_stack": [
+            f"{PY} {SCRIPTS_DIR / 'ensure_tracked_path_watcher.py'}",
+            f"{PY} {SCRIPTS_DIR / 'ensure_heartbeat_worker.py'}",
+            f"{PY} {SCRIPTS_DIR / 'start_search_service.py'}",
+        ],
+        "stop_memory_stack": [
+            f"{PY} {SCRIPTS_DIR / 'stop_tracked_path_watcher.py'}",
+            f"{PY} {SCRIPTS_DIR / 'stop_heartbeat_worker.py'}",
+            f"{PY} {SCRIPTS_DIR / 'stop_search_service.py'}",
+        ],
+    }
+    cmds = actions.get(action, [])
+    parts = []
+    for cmd in cmds:
+        parts.append(f"$ {cmd}\n{run_stack_command(cmd)}")
+    return "\n\n".join(parts)
+
+
+def read_heartbeat_tuning_state() -> dict:
+    code = (
+        "import sys, json; from pathlib import Path; "
+        "sys.path.insert(0, str(Path.home()/'.openclaw'/'workspace'/'.memory-index'/'scripts')); "
+        "from checkpoint_db import get_state, close_pool; "
+        "print(json.dumps({'heartbeat_tuning': get_state('heartbeat_tuning', {}), 'effective_interval': get_state('heartbeat_effective_interval_seconds', None)})); "
+        "close_pool()"
+    )
+    proc = subprocess.run(
+        [PY, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(SCRIPTS_DIR),
+        env=os.environ.copy(),
+    )
+    try:
+        return json.loads((proc.stdout or "{}").strip())
+    except Exception:
+        return {"heartbeat_tuning": {}, "effective_interval": None}
 
 @router.get("/")
 def overview(request: Request):
@@ -112,10 +288,6 @@ def overview(request: Request):
 def agents_page(request: Request):
     return render(request, "Agent Registry", "agents")
 
-
-@router.get("/heartbeat")
-def heartbeat_page(request: Request):
-    return render(request, "Heartbeat Settings", "heartbeat")
 
 
 @router.get("/projects")
@@ -404,6 +576,39 @@ def search_run(request: Request, query: str = Form(...)):
         search_results=results,
         search_query=query,
     )
+
+@router.get("/checkpoints")
+def checkpoints_page(request: Request):
+    return render(request, "Memory Checkpoints", "checkpoints")
+
+@router.get("/heartbeat", response_class=HTMLResponse)
+def heartbeat_page(request: Request):
+    return render(
+        request,
+        "Heartbeat Settings",
+        "heartbeat",
+        extra_context=services_page_data(),
+    )
+
+@router.get("/services", response_class=HTMLResponse)
+def services_page(request: Request):
+    return render(
+        request,
+        "Memory Stack Services",
+        "services",
+        extra_context=services_page_data(),
+    )
+
+@router.post("/stack/action")
+def stack_action(action: str = Form(...)):
+    output = run_stack_action(action)
+    return RedirectResponse(url=f"/services?output={action}", status_code=303)
+
+
+@router.post("/stack/run-script")
+def stack_run_script(script_name: str = Form(...)):
+    output = run_stack_command(f"{PY} {SCRIPTS_DIR / script_name}")
+    return RedirectResponse(url=f"/heartbeat?output={script_name}", status_code=303)
 
 @router.post("/conflicts/restore")
 def conflict_restore(item_id: str = Form(...)):

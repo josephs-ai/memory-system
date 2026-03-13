@@ -1,0 +1,2700 @@
+
+===== FILE: config.json =====
+{
+  "version": 1,
+  "sourceMemoryRoot": "/home/joseph-ding/.openclaw/workspace",
+  "sourceFiles": [
+    "MEMORY.md",
+    "memory/browser.md",
+    "memory/preferences.md",
+    "memory/projects.md",
+    "memory/learned-fixes.md",
+    "memory/gateway.md",
+    "memory/worker.md"
+  ],
+  "sourceGlobs": [
+    "memory/daily/*.md",
+    "memory/projects/**/*.md"
+  ],
+  "chunkTargetWords": 100,
+  "chunkOverlapWords": 25,
+  "indexDb": "/home/joseph-ding/.openclaw/workspace/.memory-index/memory.sqlite",
+  "chunksDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/chunks",
+  "embeddingsDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/embeddings",
+  "logsDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/logs"
+}
+
+===== FILE: scripts/heartbeat_memory_worker.py =====
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Any
+from heartbeat_tuning import compute_effective_interval
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+CONTROL_PANEL_DIR = WORKSPACE / ".memory-index" / "control_panel"
+CONFIG_PATH = CONTROL_PANEL_DIR / "control_panel_config.json"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+
+from checkpoint_db import (
+    advisory_lock,
+    begin_checkpoint,
+    claim_next_trigger,
+    close_pool,
+    complete_trigger,
+    ensure_checkpoint_tables,
+    fail_trigger,
+    get_state,
+    mark_stale_processing_checkpoints,
+    mark_stale_processing_triggers,
+    set_state,
+    update_checkpoint,
+)
+
+from heartbeat_manager_common import LOG_FILE, build_runtime_env
+
+POLL_SECONDS = 5
+DEFAULT_DEBOUNCE_SECONDS = 12
+
+IGNORED_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    "neo4j_data",
+    "qdrant_data",
+    ".pytest_cache",
+    ".mypy_cache",
+}
+IGNORED_SUFFIXES = {
+    ".log",
+    ".tmp",
+    ".temp",
+    ".swp",
+    ".swo",
+    ".pyc",
+}
+IGNORED_FILE_NAMES = {
+    ".DS_Store",
+}
+
+LOGGER = logging.getLogger("heartbeat_worker")
+STOP_REQUESTED = False
+
+
+def setup_logging() -> None:
+    if LOGGER.handlers:
+        return
+
+    max_bytes = int(os.environ.get("OPENCLAW_HEARTBEAT_LOG_MAX_BYTES", "5242880"))
+    backups = int(os.environ.get("OPENCLAW_HEARTBEAT_LOG_BACKUPS", "5"))
+
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=max_bytes,
+        backupCount=backups,
+        encoding="utf-8",
+    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    handler.setFormatter(formatter)
+
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.addHandler(handler)
+    LOGGER.propagate = False
+
+
+def _handle_signal(signum, frame):
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    LOGGER.info("received_signal signum=%s", signum)
+
+
+def load_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def is_ignored_path(path: Path) -> bool:
+    if path.name in IGNORED_FILE_NAMES:
+        return True
+    if path.suffix.lower() in IGNORED_SUFFIXES:
+        return True
+    return any(part in IGNORED_DIR_NAMES for part in path.parts)
+
+
+def iter_files(path_str: str):
+    p = Path(path_str).expanduser()
+    if not p.exists():
+        return
+    if p.is_file():
+        if not is_ignored_path(p):
+            yield p
+        return
+    for fp in p.rglob("*"):
+        if fp.is_file() and not is_ignored_path(fp):
+            yield fp
+
+
+def sha1_file(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def snapshot_tracked_paths(paths: list[str]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for path_str in paths:
+        for fp in iter_files(path_str):
+            try:
+                stat = fp.stat()
+                out[str(fp)] = {
+                    "mtime": stat.st_mtime,
+                    "size": stat.st_size,
+                    "sha1": sha1_file(fp),
+                }
+            except Exception:
+                continue
+    return out
+
+
+def diff_snapshot(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    old_keys = set(old.keys())
+    new_keys = set(new.keys())
+
+    added = sorted(new_keys - old_keys)
+    removed = sorted(old_keys - new_keys)
+    changed = sorted(
+        k for k in (old_keys & new_keys)
+        if old[k].get("sha1") != new[k].get("sha1")
+    )
+
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "count": len(added) + len(removed) + len(changed),
+    }
+
+
+def run_cmd(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def run_pipeline_and_sync(env: dict[str, str]) -> dict[str, Any]:
+    py = sys.executable
+
+    steps = [
+        {
+            "name": "maintenance_cycle",
+            "cmd": [py, str(SCRIPTS_DIR / "run_memory_maintenance_cycle.py")],
+        },
+        {
+            "name": "embed_active",
+            "cmd": [py, str(SCRIPTS_DIR / "embed_memory_items.py"), "--batch-size", "64"],
+        },
+        {
+            "name": "sync_neo4j",
+            "cmd": [py, str(SCRIPTS_DIR / "sync_memory_to_neo4j.py")],
+        },
+    ]
+
+    summary: dict[str, Any] = {"steps": [], "ok": True}
+
+    for step in steps:
+        LOGGER.info("pipeline_step_start name=%s", step["name"])
+        proc = run_cmd(step["cmd"], env)
+        row = {
+            "name": step["name"],
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-4000:],
+            "stderr": proc.stderr[-4000:],
+        }
+        summary["steps"].append(row)
+
+        if proc.returncode != 0:
+            LOGGER.error(
+                "pipeline_step_failed name=%s returncode=%s",
+                step["name"],
+                proc.returncode,
+            )
+            summary["ok"] = False
+            break
+
+        LOGGER.info("pipeline_step_ok name=%s", step["name"])
+
+    return summary
+
+
+def consume_watcher_trigger() -> dict[str, Any] | None:
+    trigger = get_state("watcher_trigger", None)
+    if not trigger or not isinstance(trigger, dict):
+        return None
+
+    if not trigger.get("trigger_requested"):
+        return None
+
+    set_state("watcher_trigger", {
+        "trigger_requested": False,
+        "consumed_at": time.time(),
+        "last_consumed_trigger": trigger,
+    })
+    set_state("watcher_last_consumed_trigger", trigger)
+    return trigger
+
+def claim_durable_trigger() -> dict[str, Any] | None:
+    mark_stale_processing_triggers()
+    return claim_next_trigger()
+
+def maybe_run_checkpoint(
+    trigger_type: str,
+    trigger_reason: str,
+    delta_meta: dict[str, Any],
+    *,
+    trigger_row: dict[str, Any] | None = None,
+) -> bool:
+    env = build_runtime_env()
+
+    with advisory_lock():
+        checkpoint_id = begin_checkpoint(trigger_type, trigger_reason, delta_meta)
+        LOGGER.info(
+            "checkpoint_begin id=%s trigger_type=%s trigger_reason=%s delta_count=%s",
+            checkpoint_id,
+            trigger_type,
+            trigger_reason,
+            delta_meta.get("count", 0),
+        )
+
+
+===== FILE: scripts/tracked_path_watcher.py =====
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import time
+from pathlib import Path
+from typing import Any
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from checkpoint_db import close_pool, enqueue_trigger, ensure_checkpoint_tables, set_state
+from heartbeat_manager_common import build_runtime_env
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+CONTROL_PANEL_DIR = WORKSPACE / ".memory-index" / "control_panel"
+CONFIG_PATH = CONTROL_PANEL_DIR / "control_panel_config.json"
+
+IGNORED_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    ".memory-index",
+    "neo4j_data",
+    "qdrant_data",
+    ".pytest_cache",
+    ".mypy_cache",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".venv",
+    "venv",
+}
+IGNORED_SUFFIXES = {
+    ".log",
+    ".tmp",
+    ".temp",
+    ".swp",
+    ".swo",
+    ".pyc",
+    ".pyo",
+    ".cache",
+}
+IGNORED_FILE_NAMES = {
+    ".DS_Store",
+}
+
+STOP_REQUESTED = False
+DEFAULT_DEBOUNCE_SECONDS = 10.0
+DEFAULT_MAX_WAIT_SECONDS = 45.0
+BOOTSTRAP_QUIET_SECONDS = 2.0
+
+
+def _handle_signal(signum, frame):
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+
+
+def load_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Missing config: {CONFIG_PATH}")
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def is_ignored_path(path: Path) -> bool:
+    if path.name in IGNORED_FILE_NAMES:
+        return True
+    if path.suffix.lower() in IGNORED_SUFFIXES:
+        return True
+    return any(part in IGNORED_DIR_NAMES for part in path.parts)
+
+
+def current_file_fingerprint(path: Path) -> dict[str, Any] | None:
+    try:
+        st = path.stat()
+        return {
+            "exists": True,
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+        }
+    except FileNotFoundError:
+        return {"exists": False}
+    except Exception:
+        return None
+
+
+def read_inotify_limit() -> int | None:
+    p = Path("/proc/sys/fs/inotify/max_user_watches")
+    if not p.exists():
+        return None
+    try:
+        return int(p.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+
+
+def estimate_watch_load(paths: list[str]) -> int:
+    count = 0
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if not p.exists():
+            continue
+        if p.is_file():
+            count += 1
+            continue
+        for d, dirs, files in os.walk(p):
+            dp = Path(d)
+            if is_ignored_path(dp):
+                dirs[:] = []
+                continue
+            dirs[:] = [x for x in dirs if not is_ignored_path(dp / x)]
+            count += 1
+    return count
+
+
+class DebouncedTrackedPathHandler(FileSystemEventHandler):
+    def __init__(self, tracked_paths: list[str], debounce_seconds: float, max_wait_seconds: float):
+        super().__init__()
+        self.debounce_seconds = debounce_seconds
+        self.max_wait_seconds = max_wait_seconds
+
+        self.first_event_at: float | None = None
+        self.last_event_at: float | None = None
+
+        self.changed_paths: set[str] = set()
+        self.path_fingerprints: dict[str, dict[str, Any]] = {}
+
+        self.bootstrap_done = False
+        self.bootstrap_started_at = time.time()
+
+        self.tracked_files: set[Path] = set()
+        self.tracked_dirs: list[Path] = []
+
+        for raw in tracked_paths:
+            p = Path(raw).expanduser().resolve()
+            if not p.exists():
+                continue
+            if p.is_file():
+                self.tracked_files.add(p)
+            else:
+                self.tracked_dirs.append(p)
+
+    def finish_bootstrap(self) -> None:
+        self.bootstrap_done = True
+        set_state(
+            "watcher_bootstrap",
+            {
+                "done": True,
+                "finished_at": time.time(),
+            },
+        )
+
+    def _is_allowed_tracked_path(self, path: Path) -> bool:
+        try:
+            rp = path.resolve()
+        except Exception:
+            return False
+
+        if rp in self.tracked_files:
+            return True
+
+        for d in self.tracked_dirs:
+            try:
+                rp.relative_to(d)
+                return True
+            except ValueError:
+                continue
+
+        return False
+
+    def _record_path(self, path: Path, event_type: str) -> None:
+        try:
+            rp = path.resolve()
+        except Exception:
+            return
+
+        # hard kill-switch for internal control/runtime files
+        if ".memory-index" in rp.parts:
+            return
+
+        if is_ignored_path(rp):
+            return
+        if not self._is_allowed_tracked_path(rp):
+            return
+
+        fp = current_file_fingerprint(rp)
+        if fp is None:
+            return
+
+        key = str(rp)
+
+        old_fp = self.path_fingerprints.get(key)
+
+        if old_fp == fp and event_type == "modified":
+            return
+
+        self.path_fingerprints[key] = fp
+        self.changed_paths.add(key)
+
+        now = time.time()
+        if self.first_event_at is None:
+            self.first_event_at = now
+        self.last_event_at = now
+
+        set_state(
+            "watcher_last_event",
+            {
+                "path": key,
+                "event_type": event_type,
+                "at": now,
+                "bootstrap_done": self.bootstrap_done,
+            },
+        )
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        self._record_path(Path(event.src_path), "created")
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        self._record_path(Path(event.src_path), "modified")
+
+    def on_deleted(self, event):
+        if event.is_directory:
+            return
+        self._record_path(Path(event.src_path), "deleted")
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        self._record_path(Path(event.src_path), "moved_from")
+        self._record_path(Path(event.dest_path), "moved_to")
+
+    def flush_if_ready(self) -> bool:
+        if not self.changed_paths or self.last_event_at is None:
+            return False
+
+        now = time.time()
+        debounce_ready = (now - self.last_event_at) >= self.debounce_seconds
+        max_wait_ready = (
+            self.first_event_at is not None
+            and (now - self.first_event_at) >= self.max_wait_seconds
+        )
+
+        if not debounce_ready and not max_wait_ready:
+            return False
+
+        changed = sorted(self.changed_paths)
+        trigger_reason = (
+            "inotify_tracked_path_change_max_wait"
+            if max_wait_ready and not debounce_ready
+            else "inotify_tracked_path_change"
+        )
+
+        payload = {
+            "trigger_requested": True,
+
+===== FILE: scripts/project_memory_paths.py =====
+from datetime import datetime, timezone
+from pathlib import Path
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+MEMORY_DIR = WORKSPACE / "memory"
+PROJECTS_DIR = MEMORY_DIR / "projects"
+
+
+def normalize_project_id(project_id: str) -> str:
+    s = (project_id or "").strip().lower().replace(" ", "-").replace("_", "-")
+    while "--" in s:
+        s = s.replace("--", "-")
+    s = s.strip("-")
+    if not s:
+        raise ValueError("project_id cannot be empty")
+    return s
+
+
+def today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def get_project_dir(project_id: str) -> Path:
+    pid = normalize_project_id(project_id)
+    return PROJECTS_DIR / pid
+
+
+def ensure_project_dirs(project_id: str):
+    project_dir = get_project_dir(project_id)
+    daily_dir = project_dir / "daily"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    return project_dir, daily_dir
+
+
+def get_project_current_file(project_id: str) -> Path:
+    project_dir, _ = ensure_project_dirs(project_id)
+    return project_dir / "current.md"
+
+
+def get_project_daily_file(project_id: str, day: str | None = None) -> Path:
+    _, daily_dir = ensure_project_dirs(project_id)
+    if day is None:
+        day = today_utc()
+    return daily_dir / f"{day}.md"
+
+
+def get_project_snapshot_file(project_id: str) -> Path:
+    project_dir, _ = ensure_project_dirs(project_id)
+    return project_dir / "latest-workspace-snapshot.json"
+
+
+def get_project_summary_file(project_id: str) -> Path:
+    project_dir, _ = ensure_project_dirs(project_id)
+    return project_dir / "latest-workspace-summary.json"
+
+
+def get_latest_project_daily_file(project_id: str):
+    _, daily_dir = ensure_project_dirs(project_id)
+    files = sorted(daily_dir.glob("*.md"))
+    if not files:
+        return None
+    return files[-1]
+
+===== FILE: scripts/memory_db.py =====
+import os
+from pathlib import Path
+
+import psycopg
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=postgres")
+
+POOL = ConnectionPool(
+    conninfo=DEFAULT_DSN,
+    min_size=1,
+    max_size=8,
+    kwargs={"autocommit": False},
+)
+
+MEMORY_ITEM_COLUMNS = [
+    "id",
+    "text",
+    "memory_type",
+    "scope",
+    "entity",
+    "property",
+    "value",
+    "status",
+    "confidence",
+    "importance",
+    "freshness_class",
+    "source_agent",
+    "source_session",
+    "source_chunk",
+    "first_seen",
+    "last_confirmed",
+    "supersedes",
+    "tags",
+    "notes",
+    "candidate_id",
+    "candidate_score",
+    "candidate_reasons",
+    "suggested_route",
+    "target_file",
+    "target_section",
+    "sensitivity",
+    "approved_at",
+    "approved_by",
+    "approval_source",
+    "rejected_at",
+    "rejected_by",
+    "rejection_reason",
+    "rejection_source",
+    "ranking_bonus",
+    "ranking_penalty",
+    "feedback_last_applied_at",
+]
+
+JSONB_COLUMNS = {"tags", "candidate_reasons"}
+
+UPSERT_SQL = f"""
+INSERT INTO memory_items (
+    {", ".join(MEMORY_ITEM_COLUMNS)}
+) VALUES (
+    {", ".join(f"%({c})s" for c in MEMORY_ITEM_COLUMNS)}
+)
+ON CONFLICT (id) DO UPDATE SET
+    text = EXCLUDED.text,
+    memory_type = EXCLUDED.memory_type,
+    scope = EXCLUDED.scope,
+    entity = EXCLUDED.entity,
+    property = EXCLUDED.property,
+    value = EXCLUDED.value,
+    status = EXCLUDED.status,
+    confidence = EXCLUDED.confidence,
+    importance = EXCLUDED.importance,
+    freshness_class = EXCLUDED.freshness_class,
+    source_agent = EXCLUDED.source_agent,
+    source_session = EXCLUDED.source_session,
+    source_chunk = EXCLUDED.source_chunk,
+    first_seen = COALESCE(memory_items.first_seen, EXCLUDED.first_seen),
+    last_confirmed = EXCLUDED.last_confirmed,
+    supersedes = EXCLUDED.supersedes,
+    tags = EXCLUDED.tags,
+    notes = EXCLUDED.notes,
+    candidate_id = EXCLUDED.candidate_id,
+    candidate_score = EXCLUDED.candidate_score,
+    candidate_reasons = EXCLUDED.candidate_reasons,
+    suggested_route = EXCLUDED.suggested_route,
+    target_file = EXCLUDED.target_file,
+    target_section = EXCLUDED.target_section,
+    sensitivity = EXCLUDED.sensitivity,
+    approved_at = EXCLUDED.approved_at,
+    approved_by = EXCLUDED.approved_by,
+    approval_source = EXCLUDED.approval_source,
+    rejected_at = EXCLUDED.rejected_at,
+    rejected_by = EXCLUDED.rejected_by,
+    rejection_reason = EXCLUDED.rejection_reason,
+    rejection_source = EXCLUDED.rejection_source,
+    ranking_bonus = EXCLUDED.ranking_bonus,
+    ranking_penalty = EXCLUDED.ranking_penalty,
+    feedback_last_applied_at = EXCLUDED.feedback_last_applied_at,
+    updated_at = now()
+"""
+
+
+def normalize_memory_item(item: dict) -> dict:
+    row = {}
+    for col in MEMORY_ITEM_COLUMNS:
+        value = item.get(col)
+
+        if col in JSONB_COLUMNS:
+            if value is None:
+                value = [] if col in {"tags", "candidate_reasons"} else {}
+            value = Jsonb(value)
+
+        elif col == "status":
+            value = value or "active"
+
+        elif col == "sensitivity":
+            value = value or "public"
+
+        elif col == "ranking_bonus":
+            value = 0 if value is None else value
+
+        elif col == "ranking_penalty":
+            value = 0 if value is None else value
+
+        row[col] = value
+
+    return row
+
+
+def get_conn():
+    return POOL.connection()
+
+
+def upsert_memory_item(item: dict):
+    row = normalize_memory_item(item)
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(UPSERT_SQL, row)
+        conn.commit()
+
+
+def upsert_memory_items(items: list[dict]):
+    rows = [normalize_memory_item(x) for x in items]
+    if not rows:
+        return
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(UPSERT_SQL, rows)
+        conn.commit()
+
+def upsert_pending_stable(items: list[dict]):
+    if not items:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO memory_pending_stable (id, payload)
+                VALUES (%s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    payload = EXCLUDED.payload
+                """,
+                [(item.get("id"), Jsonb(item)) for item in items],
+            )
+        conn.commit()
+
+
+def upsert_inbox(items: list[dict]):
+    if not items:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO memory_inbox (id, payload)
+                VALUES (%s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    payload = EXCLUDED.payload
+                """,
+                [(item.get("id"), Jsonb(item)) for item in items],
+            )
+        conn.commit()
+
+
+def upsert_discarded(items: list[dict]):
+    if not items:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO memory_discarded (id, payload)
+                VALUES (%s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    payload = EXCLUDED.payload
+                """,
+                [(item.get("id"), Jsonb(item)) for item in items],
+            )
+        conn.commit()
+
+def insert_retrieval_feedback(rows: list[dict]):
+    if not rows:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO retrieval_feedback (
+                    selected_id,
+                    selected_score,
+                    selected_status,
+                    operator_feedback,
+                    feedback_note,
+                    feedback_at,
+                    candidate_file,
+                    target_file,
+                    include_superseded,
+                    payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        row.get("selected_id"),
+                        row.get("selected_score"),
+                        row.get("selected_status"),
+                        row.get("operator_feedback"),
+                        row.get("feedback_note"),
+                        row.get("feedback_at"),
+                        row.get("candidate_file"),
+                        row.get("target_file"),
+                        row.get("include_superseded"),
+                        Jsonb(row),
+                    )
+                    for row in rows
+                ],
+            )
+        conn.commit()
+
+
+def upsert_global_insights(rows: list[dict]):
+    if not rows:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO global_insights (
+                    topic,
+                    text,
+                    source_project,
+                    promoted_by
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (topic, text) DO UPDATE SET
+                    source_project = EXCLUDED.source_project,
+                    promoted_by = EXCLUDED.promoted_by
+                """,
+                [
+
+===== FILE: scripts/dehydrate_transcript.py =====
+import json
+import argparse
+import re
+from pathlib import Path
+
+OPENCLAW_ROOT = Path.home() / ".openclaw"
+AGENTS_DIR = OPENCLAW_ROOT / "agents"
+
+LOW_VALUE_PATTERNS = [
+    r"let me know if you need anything else",
+    r"i have opened google",
+    r"i've opened your default browser",
+    r"i have opened your browser",
+    r"the browser window should pop up",
+    r"i can also open x directly",
+]
+
+VOLATILE_PATTERNS = [
+    r"top ten links",
+    r"top 10 links",
+    r"here are some of the top search results",
+    r"breaking reports",
+    r"highly discussed news",
+    r"unfiltered real-time reports",
+]
+
+MEMORY_SIGNAL_PATTERNS = [
+    r"functionality to control browser",
+    r"browser automation capabilities",
+    r"native `browser` tool",
+    r"chrome devtools protocol",
+    r"current access",
+    r"restricted in my specific tool policy",
+    r"execute the `openclaw browser` cli commands",
+    r"supports managing different profiles",
+]
+
+def find_latest_session_for_agent(agent_name: str):
+    sessions_dir = AGENTS_DIR / agent_name / "sessions"
+    sessions_json = sessions_dir / "sessions.json"
+
+    candidates = []
+
+    if sessions_json.exists():
+        try:
+            data = json.loads(sessions_json.read_text(encoding="utf-8"))
+            for _, meta in data.items():
+                session_file = meta.get("sessionFile")
+                updated_at = meta.get("updatedAt", 0)
+                if session_file:
+                    p = Path(session_file)
+                    if p.exists():
+                        candidates.append((updated_at, p))
+        except Exception:
+            pass
+
+    for p in sessions_dir.glob("*.jsonl"):
+        try:
+            mtime = int(p.stat().st_mtime * 1000)
+        except Exception:
+            mtime = 0
+        candidates.append((mtime, p))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+def list_latest_sessions_all_agents():
+    rows = []
+    if not AGENTS_DIR.exists():
+        return rows
+    for agent_dir in sorted(AGENTS_DIR.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        latest = find_latest_session_for_agent(agent_dir.name)
+        if latest:
+            rows.append((agent_dir.name, latest))
+    return rows
+
+def load_events(path: Path):
+    events = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                pass
+    return events
+
+def strip_sender_wrapper(text: str) -> str:
+    text = re.sub(
+        r"Sender \(untrusted metadata\):\s*```json.*?```\s*",
+        "",
+        text,
+        flags=re.DOTALL
+    )
+    return text.strip()
+
+def strip_system_spam(text: str) -> str:
+    lines = text.splitlines()
+    kept = []
+    for line in lines:
+        s = line.strip()
+
+        if s.startswith("System: [") and (
+            "WhatsApp gateway connected" in s
+            or "WhatsApp gateway disconnected" in s
+            or "Exec completed" in s
+        ):
+            continue
+
+        if "Read HEARTBEAT.md if it exists" in s:
+            continue
+        if "When reading HEARTBEAT.md" in s:
+            continue
+        if s.startswith("Current time:"):
+            continue
+
+        kept.append(line)
+
+    return "\n".join(kept).strip()
+
+def clean_user_text(text: str) -> str:
+    text = strip_sender_wrapper(text)
+    text = strip_system_spam(text)
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+    return text
+
+def extract_assistant_text(content_list):
+    texts = []
+    for block in content_list:
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text", "").strip()
+            if not txt:
+                continue
+            if txt.startswith("think\n"):
+                continue
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL)
+            txt = re.sub(r"</?final>", "", txt, flags=re.IGNORECASE)
+            txt = txt.strip()
+            if txt:
+                texts.append(txt)
+    return "\n".join(texts).strip()
+
+def is_low_value_assistant(text: str) -> bool:
+    t = text.lower()
+    if any(re.search(p, t) for p in MEMORY_SIGNAL_PATTERNS):
+        return False
+    if any(re.search(p, t) for p in LOW_VALUE_PATTERNS):
+        return True
+    if any(re.search(p, t) for p in VOLATILE_PATTERNS):
+        return True
+    return False
+
+def dehydrate_events(events):
+    out = []
+
+    for e in events:
+        if e.get("type") != "message":
+            continue
+
+        msg = e.get("message", {})
+        role = msg.get("role")
+
+        if role == "toolResult":
+            continue
+
+        content = msg.get("content", [])
+
+        if role == "user":
+            parts = []
+            for block in content:
+                if block.get("type") == "text":
+                    txt = clean_user_text(block.get("text", ""))
+                    if txt:
+                        parts.append(txt)
+            text = "\n".join(parts).strip()
+            if text:
+                out.append(("USER", text))
+
+        elif role == "assistant":
+            text = extract_assistant_text(content)
+            if not text or text == "HEARTBEAT_OK":
+                continue
+            if is_low_value_assistant(text):
+                continue
+            out.append(("ASSISTANT", text))
+
+    return out
+
+def print_dehydrated(label, pairs):
+    print(f"===== {label} =====")
+    for role, text in pairs:
+        print(f"{role}: {text}")
+        print()
+    print()
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file")
+    parser.add_argument("--agent")
+    parser.add_argument("--all-agents", action="store_true")
+    args = parser.parse_args()
+
+    if args.file:
+        path = Path(args.file)
+        pairs = dehydrate_events(load_events(path))
+        print_dehydrated(str(path), pairs)
+        return
+
+    if args.agent:
+        path = find_latest_session_for_agent(args.agent)
+        if not path:
+            print(f"No latest session found for agent: {args.agent}")
+            return
+        pairs = dehydrate_events(load_events(path))
+        print_dehydrated(f"{args.agent}: {path}", pairs)
+        return
+
+    if args.all_agents:
+        rows = list_latest_sessions_all_agents()
+        if not rows:
+            print("No sessions found.")
+            return
+        for agent_name, path in rows:
+            pairs = dehydrate_events(load_events(path))
+            print_dehydrated(f"{agent_name}: {path}", pairs)
+        return
+
+    print("Use one of: --file PATH | --agent NAME | --all-agents")
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/chunk_by_topic.py =====
+import re
+import argparse
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input", required=True)
+parser.add_argument("--outdir", required=True)
+args = parser.parse_args()
+
+input_path = Path(args.input)
+outdir = Path(args.outdir)
+outdir.mkdir(parents=True, exist_ok=True)
+
+text = input_path.read_text(encoding="utf-8", errors="ignore")
+lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+
+def clean_role_prefix(line: str) -> str:
+    return re.sub(r"^(USER|ASSISTANT):\s*", "", line, flags=re.IGNORECASE).strip()
+
+def normalize_line(line: str) -> str:
+    t = clean_role_prefix(line)
+    t = re.sub(r"^(did u know that|did you know that)\s+", "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+def is_header(line: str) -> bool:
+    return line.strip().startswith("=====")
+
+def is_startup_instruction(line: str) -> bool:
+    t = normalize_line(line).lower()
+    return (
+        "a new session was started via /new or /reset" in t
+        or "execute your session startup sequence" in t
+        or "read the required files before responding" in t
+    )
+
+def is_chatter(line: str) -> bool:
+    t = normalize_line(line).lower()
+    return (
+        "who am i" in t
+        or "who are you" in t
+        or "what should my name be" in t
+        or "what should we call me" in t
+        or "what should i call you" in t
+        or t.startswith("hello")
+        or t.startswith("hey")
+        or "blank slate" in t
+        or "just woke up" in t
+        or "get properly introduced" in t
+        or "good to know" in t
+        or "i'm here" in t
+        or "i am here" in t
+        or "we got distracted" in t
+    )
+
+def is_durable_statement(line: str) -> bool:
+    t = normalize_line(line).lower()
+    if t.endswith("?"):
+        return False
+    durable_cues = [
+        " now ",
+        " now uses ",
+        " uses ",
+        " supports ",
+        " instead of ",
+        " changed ",
+        " replaced ",
+        " policy ",
+        " decision ",
+        " registry ",
+        " canonical ",
+        " memory ",
+        " prefers ",
+        " is managed through ",
+        " works through ",
+    ]
+    padded = f" {t} "
+    return any(cue in padded for cue in durable_cues)
+
+def classify_line(line: str) -> str:
+    if is_header(line):
+        return "header"
+    if is_startup_instruction(line):
+        return "startup"
+    if is_chatter(line):
+        return "chatter"
+    if is_durable_statement(line):
+        return "durable"
+    return "other"
+
+chunks = []
+current = []
+current_kind = None
+current_norms = set()
+
+for line in lines:
+    kind = classify_line(line)
+    norm = normalize_line(line)
+
+    if kind == "header":
+        continue
+
+    should_split = False
+    if current:
+        if kind != current_kind:
+            should_split = True
+        elif kind == "durable" and norm not in current_norms:
+            should_split = True
+
+    if should_split:
+        chunks.append((current_kind, current))
+        current = [line]
+        current_kind = kind
+        current_norms = {norm}
+    else:
+        current.append(line)
+        current_kind = kind
+        current_norms.add(norm)
+
+if current:
+    chunks.append((current_kind, current))
+
+base = input_path.stem
+for i, (kind, chunk) in enumerate(chunks, start=1):
+    out = outdir / f"{base}.topic{i:02d}.{kind}.txt"
+    out.write_text("\n".join(chunk) + "\n", encoding="utf-8")
+
+print(f"chunks: {len(chunks)}")
+for i, (kind, chunk) in enumerate(chunks, start=1):
+    print(f"{i:02d}: kind={kind} lines={len(chunk)}")
+
+===== FILE: scripts/extract_chunk_updates.py =====
+import json
+import argparse
+import subprocess
+import tempfile
+from pathlib import Path
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+
+GENERATE_SCRIPT = SCRIPTS_DIR / "generate_memory_candidates.py"
+FILTER_SCRIPT = SCRIPTS_DIR / "filter_memory_candidates.py"
+JUDGE_SCRIPT = SCRIPTS_DIR / "judge_memory_candidates.py"
+
+
+def run_stage(cmd):
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def write_temp_text(text: str, suffix: str) -> Path:
+    tmp = Path(tempfile.mkstemp(suffix=suffix)[1])
+    tmp.write_text(text + ("\n" if text and not text.endswith("\n") else ""), encoding="utf-8")
+    return tmp
+
+
+def load_jsonl_text(text: str):
+    items = []
+    if not text or text.strip() == "NONE":
+        return items
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s == "NONE":
+            continue
+        try:
+            items.append(json.loads(s))
+        except Exception:
+            pass
+    return items
+
+
+def dedupe_items(items):
+    seen = set()
+    out = []
+    for item in items:
+        key = (
+            item.get("memory_type"),
+            item.get("entity"),
+            item.get("property"),
+            item.get("value"),
+            item.get("text"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chunk-dir", required=True)
+    parser.add_argument("--source-agent", default="unknown")
+    parser.add_argument("--source-session", default="unknown")
+    parser.add_argument("--reduced-only", action="store_true")
+    args = parser.parse_args()
+
+    chunk_dir = Path(args.chunk_dir)
+    chunk_files = sorted(chunk_dir.glob("*.txt"))
+
+    if not chunk_files:
+        print("No chunk files found.")
+        return
+
+    reduced = []
+
+    for chunk_file in chunk_files:
+        if not args.reduced_only:
+            print(f"===== {chunk_file.name} =====")
+
+        generated = run_stage([
+            "python3",
+            str(GENERATE_SCRIPT),
+            str(chunk_file),
+            "--source-agent", args.source_agent,
+            "--source-session", args.source_session,
+            "--source-chunk", chunk_file.name,
+        ])
+
+        if not generated or generated == "NONE":
+            if not args.reduced_only:
+                print("NONE")
+                print()
+            continue
+
+        generated_tmp = write_temp_text(generated, ".generated.jsonl")
+
+        filtered = run_stage([
+            "python3",
+            str(FILTER_SCRIPT),
+            str(generated_tmp),
+        ])
+
+        if not filtered or filtered == "NONE":
+            if not args.reduced_only:
+                print("NONE")
+                print()
+            try:
+                generated_tmp.unlink()
+            except Exception:
+                pass
+            continue
+
+        filtered_tmp = write_temp_text(filtered, ".filtered.jsonl")
+
+        judged = run_stage([
+            "python3",
+            str(JUDGE_SCRIPT),
+            str(filtered_tmp),
+        ])
+
+
+        if not judged or judged == "NONE":
+            if not args.reduced_only:
+                print("NONE")
+                print()
+            try:
+                generated_tmp.unlink()
+            except Exception:
+                pass
+            try:
+                filtered_tmp.unlink()
+            except Exception:
+                pass
+            continue
+
+        items = load_jsonl_text(judged)
+        items = dedupe_items(items)
+
+        if not items:
+            if not args.reduced_only:
+                print("NONE")
+                print()
+        else:
+            if not args.reduced_only:
+                for item in items:
+                    print(json.dumps(item, ensure_ascii=False))
+                print()
+
+            for item in items:
+                reduced.append(item)
+        try:
+            generated_tmp.unlink()
+        except Exception:
+            pass
+        try:
+            filtered_tmp.unlink()
+        except Exception:
+            pass
+
+    reduced = dedupe_items(reduced)
+
+    if args.reduced_only:
+        if not reduced:
+            print("NONE")
+        else:
+            for item in reduced:
+                print(json.dumps(item, ensure_ascii=False))
+    else:
+        print("===== REDUCED UPDATES =====")
+        if not reduced:
+            print("NONE")
+        else:
+            for item in reduced:
+                print(json.dumps(item, ensure_ascii=False))
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/route_memory_items_batch.py =====
+import json
+import argparse
+import subprocess
+import tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+from memory_routing_rules import stable_safe_auto
+
+from memory_db import (
+    upsert_pending_stable,
+    upsert_inbox,
+    upsert_discarded,
+    upsert_memory_item,
+    queue_item_exists_anywhere,
+    candidate_matches_rejected,
+    close_pool,
+)
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+REVIEW_DIR = WORKSPACE / "memory" / "review"
+DECISIONS_LOG = REVIEW_DIR / "decisions.log"
+
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+AGENT_POLICY_SCRIPT = SCRIPTS_DIR / "check_agent_memory_policy.py"
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_jsonl_text(text: str):
+    items = []
+    if not text or text.strip() == "NONE":
+        return items
+
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s == "NONE":
+            continue
+        try:
+            items.append(json.loads(s))
+        except Exception:
+            pass
+    return items
+
+
+def append_log(line: str):
+    with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def json_safe(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def write_temp_json(item: dict) -> Path:
+    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
+    tmp.write_text(
+        json.dumps(item, ensure_ascii=False, indent=2, default=json_safe),
+        encoding="utf-8",
+    )
+    return tmp
+
+
+def apply_agent_policy(item: dict) -> tuple[str, str]:
+    agent = item.get("source_agent", "default")
+    tmp = write_temp_json(item)
+
+    try:
+        result = subprocess.run(
+            [
+                "python3",
+                str(AGENT_POLICY_SCRIPT),
+                "--agent",
+                agent,
+                "--item",
+                str(tmp),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        text = result.stdout.strip()
+
+        if text == "AUTO":
+            return "AUTO", "agent_policy_auto"
+        if text == "INBOX":
+            return "INBOX", "agent_policy_inbox"
+        if text.startswith("DISCARD"):
+            return "DISCARDED", f"agent_policy_{text.replace(' ', '_').lower()}"
+
+        return "INBOX", "agent_policy_unknown_fallback"
+
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
+def decide_route(item: dict) -> tuple[str, str]:
+
+    suggested = item.get("suggested_route")
+    confidence = float(item.get("confidence", 0.0) or 0.0)
+    importance = float(item.get("importance", 0.0) or 0.0)
+    scope = item.get("scope", "stable")
+
+
+    if stable_safe_auto(item):
+        return "AUTO", "stable_safe_auto"
+
+    if scope == "stable" and confidence >= 0.90 and importance >= 0.90:
+        return "PENDING_STABLE", "stable_high_importance_requires_approval"
+
+    policy_route, policy_reason = apply_agent_policy(item)
+
+    if suggested == "discard":
+        return "DISCARDED", "judge_discard"
+
+    if suggested == "pending_stable":
+        return "PENDING_STABLE", "judge_pending_stable"
+
+    if suggested == "project":
+        judge_route, judge_reason = "INBOX", "judge_project_to_inbox"
+    elif suggested == "daily":
+        judge_route, judge_reason = "INBOX", "judge_daily_to_inbox"
+    elif suggested == "auto":
+        judge_route, judge_reason = "AUTO", "judge_auto"
+    elif suggested == "inbox":
+        judge_route, judge_reason = "INBOX", "judge_inbox"
+    else:
+        if scope == "project":
+            judge_route, judge_reason = "INBOX", "fallback_project"
+        elif confidence >= 0.90 and importance >= 0.80:
+            judge_route, judge_reason = "AUTO", "fallback_high_conf_high_importance"
+        elif confidence >= 0.65:
+            judge_route, judge_reason = "INBOX", "fallback_review"
+        else:
+            judge_route, judge_reason = "DISCARDED", "fallback_low_confidence"
+
+    if policy_route == "DISCARDED":
+        return "DISCARDED", policy_reason
+
+    if policy_route == "INBOX" and judge_route == "AUTO":
+        return "INBOX", f"{policy_reason}_caps_{judge_reason}"
+
+    return judge_route, judge_reason
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    text = input_path.read_text(encoding="utf-8", errors="ignore")
+    items = load_jsonl_text(text)
+
+    if not items:
+        print("NONE")
+        return
+
+    any_output = False
+
+    for item in items:
+        item_id = item.get("id")
+
+        if item_id and queue_item_exists_anywhere(item_id):
+            print(f"SKIP_DUPLICATE {item_id} existing_db_queue")
+            append_log(f"{now_iso()} route=SKIP_DUPLICATE id={item_id} target=db_queue")
+            any_output = True
+            continue
+
+        matched_rejected, rejected_item = candidate_matches_rejected(item)
+        if matched_rejected:
+            upsert_discarded([item])
+            print("DISCARDED db:memory_discarded")
+            append_log(
+                f"{now_iso()} route=DISCARDED id={item.get('id')} "
+                f"target=memory_discarded reason=previously_rejected_memory "
+                f"matched_rejected_id={rejected_item.get('id') if rejected_item else 'unknown'}"
+            )
+            any_output = True
+            continue
+
+        route, reason = decide_route(item)
+
+        if route == "AUTO":
+            upsert_memory_item(item)
+            print("AUTO db:memory_items")
+            append_log(
+                f"{now_iso()} route=AUTO id={item.get('id')} "
+                f"confidence={item.get('confidence')} importance={item.get('importance')} "
+                f"target=memory_items reason={reason}"
+            )
+            any_output = True
+
+        elif route == "INBOX":
+            upsert_inbox([item])
+            print("INBOX db:memory_inbox")
+            append_log(
+                f"{now_iso()} route=INBOX id={item.get('id')} "
+                f"confidence={item.get('confidence')} importance={item.get('importance')} "
+                f"target=memory_inbox reason={reason}"
+            )
+            any_output = True
+
+        elif route == "PENDING_STABLE":
+            upsert_pending_stable([item])
+            print("PENDING_STABLE db:memory_pending_stable")
+            append_log(
+                f"{now_iso()} route=PENDING_STABLE id={item.get('id')} "
+                f"confidence={item.get('confidence')} importance={item.get('importance')} "
+                f"target=memory_pending_stable reason={reason}"
+            )
+            any_output = True
+
+        else:
+            upsert_discarded([item])
+            print("DISCARDED db:memory_discarded")
+            append_log(
+                f"{now_iso()} route=DISCARDED id={item.get('id')} "
+                f"confidence={item.get('confidence')} importance={item.get('importance')} "
+                f"target=memory_discarded reason={reason}"
+            )
+            any_output = True
+
+    if not any_output:
+        print("NONE")
+
+    close_pool()
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/process_auto_memory_items.py =====
+import json
+import subprocess
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from memory_db import close_pool, get_conn
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+REVIEW_DIR = WORKSPACE / "memory" / "review"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+
+DECISIONS_LOG = REVIEW_DIR / "decisions.log"
+WRITE_ITEM_SCRIPT = SCRIPTS_DIR / "write_memory_item.py"
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def append_log(line: str):
+    with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def fetch_auto_items():
+    # AUTO items are memory_items rows whose suggested_route is AUTO but are not yet finalized.
+    # We treat active rows with suggested_route='auto' and no target_file writeback requirement as candidates.
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, text, memory_type, scope, entity, property, value, status,
+                    confidence, importance, freshness_class,
+                    source_agent, source_session, source_chunk,
+                    first_seen, last_confirmed, supersedes,
+                    tags, notes, candidate_id, candidate_score, candidate_reasons,
+                    suggested_route, target_file, target_section,
+                    sensitivity, approved_at, approved_by, approval_source,
+                    rejected_at, rejected_by, rejection_reason, rejection_source,
+                    ranking_bonus, ranking_penalty, feedback_last_applied_at
+                FROM memory_items
+                WHERE suggested_route = 'auto'
+                  AND status = 'active'
+                ORDER BY id
+                """
+            )
+            cols = [d[0] for d in cur.description]
+            rows = []
+            for rec in cur.fetchall():
+                row = dict(zip(cols, rec))
+                row["tags"] = row.get("tags") or []
+                row["candidate_reasons"] = row.get("candidate_reasons") or []
+                rows.append(row)
+            return rows
+
+
+def clear_auto_flag(item_id: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE memory_items
+                SET suggested_route = NULL, updated_at = now()
+                WHERE id = %s
+                """,
+                (item_id,),
+            )
+        conn.commit()
+
+
+def write_temp_item(item: dict, idx: int) -> Path:
+    tmp = REVIEW_DIR / f".auto_process_{idx}.json"
+    tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return tmp
+
+
+def main():
+    items = fetch_auto_items()
+    if not items:
+        print("No AUTO items to process.")
+        close_pool()
+        return
+
+    print(f"AUTO items to process: {len(items)}")
+
+    remaining_count = 0
+
+    for idx, item in enumerate(items, start=1):
+        item_id = item.get("id", f"unknown-{idx}")
+        tmp = write_temp_item(item, idx)
+
+        try:
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(WRITE_ITEM_SCRIPT),
+                    "--candidate-item",
+                    str(tmp),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            out = result.stdout.strip()
+            print(f"===== ITEM {idx} id={item_id} =====")
+            print(out)
+            print()
+
+            append_log(f"{now_iso()} process_auto id={item_id}")
+
+            # Successful handling clears AUTO route so it won't be reprocessed.
+            if out:
+                clear_auto_flag(item_id)
+            else:
+                remaining_count += 1
+
+        finally:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+    print(f"Remaining AUTO items: {remaining_count}")
+    close_pool()
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/reconcile_memory_items.py =====
+import json
+import argparse
+import subprocess
+from pathlib import Path
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+MATCH_SCRIPT = SCRIPTS_DIR / "match_memory_items.py"
+
+SAFE_SUPERSEDE_PROPERTIES = {
+    "port",
+    "mode",
+    "policy",
+    "status",
+    "model",
+    "path",
+    "tool_access_mode",
+    "checkpoint_policy",
+    "forwarded_devtools_port",
+    "local_devtools_port",
+    "canonical_memory_backend",
+    "processing_capability",
+    "build_priority",
+}
+
+ARCHIVABLE_STATUSES = {"superseded", "archived"}
+LOW_CONFIDENCE_THRESHOLD = 0.75
+HIGH_CONFIDENCE_THRESHOLD = 0.90
+
+
+def load_json(path: str):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def can_auto_supersede(candidate: dict, existing: dict) -> bool:
+    prop = candidate.get("property") or existing.get("property")
+    return prop in SAFE_SUPERSEDE_PROPERTIES
+
+def confidence_of(item: dict) -> float:
+    try:
+        if "confidence" not in item or item.get("confidence") is None:
+            return 1.0
+        return float(item.get("confidence"))
+    except Exception:
+        return 1.0
+
+
+def normalized_status(item: dict) -> str:
+    return (item.get("status") or "active").strip().lower()
+
+
+def has_missing_core_value(item: dict) -> bool:
+    prop = item.get("property")
+    value = item.get("value")
+    if prop and not value:
+        return True
+    return False
+
+
+def same_slot(match: dict) -> bool:
+    return bool(
+        match.get("same_entity")
+        and match.get("same_scope")
+        and match.get("same_property")
+    )
+
+
+def same_identity(match: dict) -> bool:
+    return bool(match.get("comparable_identity"))
+
+
+def classify_outcome(candidate: dict, existing: dict, match: dict) -> str:
+    candidate_conf = confidence_of(candidate)
+    existing_conf = confidence_of(existing)
+
+    existing_status = normalized_status(existing)
+    candidate_status = normalized_status(candidate)
+
+    # 1) Exact same identity and value -> duplicate
+    if match.get("comparable_identity") and match.get("exact_identity_and_value"):
+        return "IGNORE_DUPLICATE"
+
+    # 2) Existing already superseded/archived in same slot -> archive old lineage
+    if same_slot(match) and existing_status in ARCHIVABLE_STATUSES:
+        return "ARCHIVE_OLD"
+
+    # 3) Same slot but different value
+    if match.get("same_slot_different_value"):
+        # weak or incomplete candidate update -> uncertain, not hard conflict
+        if candidate_conf < LOW_CONFIDENCE_THRESHOLD or has_missing_core_value(candidate):
+            return "MARK_UNCERTAIN"
+
+        # safe property and strong candidate -> supersede
+        if can_auto_supersede(candidate, existing):
+            return "SUPERSEDE_EXISTING"
+
+        # if both are high-confidence but not safe to auto-supersede -> conflict
+        if candidate_conf >= HIGH_CONFIDENCE_THRESHOLD and existing_conf >= HIGH_CONFIDENCE_THRESHOLD:
+            return "FLAG_CONFLICT"
+
+        # otherwise unresolved difference -> uncertain
+        return "MARK_UNCERTAIN"
+
+    # 4) Same identity but not exact value, weaker/incomplete existing -> merge or supersede
+    if same_identity(match) and not match.get("exact_identity_and_value"):
+        if candidate_conf >= existing_conf and can_auto_supersede(candidate, existing):
+            return "SUPERSEDE_EXISTING"
+        return "MERGE_INTO_EXISTING"
+
+    # 5) Weak relatedness -> merge
+    if match.get("weak_related"):
+        return "MERGE_INTO_EXISTING"
+
+    # 6) Candidate explicitly uncertain should not auto-append as strong current truth
+    if candidate_status == "uncertain":
+        return "MARK_UNCERTAIN"
+
+    # 7) Otherwise new fact
+    return "APPEND_NEW"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--existing", required=True)
+    args = parser.parse_args()
+
+    candidate = load_json(args.candidate)
+    existing = load_json(args.existing)
+
+    result = subprocess.run(
+        [
+            "python3",
+            str(MATCH_SCRIPT),
+            "--candidate", args.candidate,
+            "--existing", args.existing,
+        ],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    match = json.loads(result.stdout)
+    outcome = classify_outcome(candidate, existing, match)
+
+    out = {
+        "outcome": outcome,
+        "candidate_id": candidate.get("id"),
+        "existing_id": existing.get("id"),
+        "candidate_status": normalized_status(candidate),
+        "existing_status": normalized_status(existing),
+        "candidate_confidence": confidence_of(candidate),
+        "existing_confidence": confidence_of(existing),
+        "match": match
+    }
+
+    print(json.dumps(out, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/write_memory_item.py =====
+import json
+import argparse
+import subprocess
+import tempfile
+import sys
+from pathlib import Path
+from datetime import datetime
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from memory_db import fetch_memory_items, upsert_memory_item, close_pool
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+MEMORY_DIR = WORKSPACE / "memory"
+
+RECONCILE_SCRIPT = SCRIPTS_DIR / "reconcile_memory_items.py"
+PATCH_SCRIPT = SCRIPTS_DIR / "patch_memory_file.py"
+SELECT_REGISTRY_SCRIPT = SCRIPTS_DIR / "select_best_registry_item.py"
+
+
+def load_json(path: str):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def json_safe(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def target_file_for_item(item: dict) -> Path:
+    memory_type = item.get("memory_type")
+    entity = item.get("entity")
+    scope = item.get("scope")
+
+    if entity == "checkpoint_pipeline":
+        return MEMORY_DIR / "memory-system.md"
+
+    if memory_type == "learned_fix":
+        return MEMORY_DIR / "learned-fixes.md"
+
+    if entity == "browser":
+        return MEMORY_DIR / "browser.md"
+
+    if entity == "gateway":
+        return MEMORY_DIR / "gateway.md"
+
+    if entity == "worker":
+        return MEMORY_DIR / "worker.md"
+
+    if scope == "daily":
+        return MEMORY_DIR / "daily" / f"{datetime.now().date().isoformat()}.md"
+
+    return MEMORY_DIR / "projects.md"
+
+
+def write_temp_item(item: dict) -> Path:
+    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
+    tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2, default=json_safe), encoding="utf-8")
+    return tmp
+
+
+def registry_target_name(target: Path) -> str:
+    return target.name
+
+
+def fetch_active_registry_items():
+    return fetch_memory_items(["active"])
+
+
+def upsert_final_item(item: dict, target_name: str):
+    item = dict(item)
+    item["target_file"] = target_name
+    item.setdefault("target_section", "Active")
+    item["status"] = "active"
+
+    if item.get("suggested_route") in {"auto", "inbox", "daily", "project", "discard"}:
+        item["suggested_route"] = None
+
+    upsert_memory_item(item)
+
+
+def mark_item_superseded(existing_item: dict):
+    updated = dict(existing_item)
+    updated["status"] = "superseded"
+    upsert_memory_item(updated)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate-item", required=True)
+    args = parser.parse_args()
+
+    candidate = load_json(args.candidate_item)
+    target = target_file_for_item(candidate)
+    target_name = registry_target_name(target)
+
+    if not target.exists():
+        print(f"ERROR target file does not exist: {target}")
+        close_pool()
+        return
+
+    best_out = subprocess.run(
+        [
+            "python3",
+            str(SELECT_REGISTRY_SCRIPT),
+            "--candidate",
+            args.candidate_item,
+            "--target-file",
+            target_name,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    if not best_out or best_out == "NONE":
+        patch = subprocess.run(
+            [
+                "python3",
+                str(PATCH_SCRIPT),
+                "--target",
+                str(target),
+                "--outcome",
+                "APPEND_NEW",
+                "--candidate-item",
+                args.candidate_item,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        upsert_final_item(candidate, target_name)
+
+        print(f"target={target}")
+        print("outcome=APPEND_NEW")
+        print(patch.stdout.strip())
+        close_pool()
+        return
+
+    best_obj = json.loads(best_out)
+    existing_item = best_obj["existing_item"]
+    score = best_obj["score"]
+
+    if score < 35:
+        patch = subprocess.run(
+            [
+                "python3",
+                str(PATCH_SCRIPT),
+                "--target",
+                str(target),
+                "--outcome",
+                "APPEND_NEW",
+                "--candidate-item",
+                args.candidate_item,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        upsert_final_item(candidate, target_name)
+
+        print(f"target={target}")
+        print("outcome=APPEND_NEW")
+        print(f"best_score={score}")
+        print(patch.stdout.strip())
+        close_pool()
+        return
+
+    existing_tmp = write_temp_item(existing_item)
+
+    try:
+        rec = subprocess.run(
+            [
+                "python3",
+                str(RECONCILE_SCRIPT),
+                "--candidate",
+                args.candidate_item,
+                "--existing",
+                str(existing_tmp),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        rec_obj = json.loads(rec.stdout)
+        outcome = rec_obj["outcome"]
+
+        patch_cmd = [
+            "python3",
+            str(PATCH_SCRIPT),
+            "--target",
+            str(target),
+            "--outcome",
+            outcome,
+            "--candidate-item",
+            args.candidate_item,
+        ]
+
+        if outcome in {"MERGE_INTO_EXISTING", "SUPERSEDE_EXISTING"}:
+            patch_cmd += ["--existing-item", str(existing_tmp)]
+
+        patch = subprocess.run(
+            patch_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        if outcome == "IGNORE_DUPLICATE":
+            print(f"target={target}")
+            print(f"best_score={score}")
+            print(f"matched_existing_id={existing_item.get('id')}")
+            print("outcome=IGNORE_DUPLICATE")
+            print("NO_CHANGE duplicate")
+            close_pool()
+            return
+
+        if outcome == "MERGE_INTO_EXISTING":
+            merged = dict(existing_item)
+            merged.update(candidate)
+            merged["id"] = existing_item.get("id")
+            merged["target_file"] = target_name
+            merged["target_section"] = existing_item.get("target_section") or "Active"
+            merged["status"] = "active"
+            if merged.get("suggested_route") in {"auto", "inbox", "daily", "project", "discard"}:
+                merged["suggested_route"] = None
+            upsert_memory_item(merged)
+
+        elif outcome == "SUPERSEDE_EXISTING":
+            mark_item_superseded(existing_item)
+            new_item = dict(candidate)
+            new_item["target_file"] = target_name
+            new_item["target_section"] = "Active"
+            new_item["status"] = "active"
+            new_item["supersedes"] = existing_item.get("id")
+            if new_item.get("suggested_route") in {"auto", "inbox", "daily", "project", "discard"}:
+                new_item["suggested_route"] = None
+            upsert_memory_item(new_item)
+
+        elif outcome == "APPEND_NEW":
+            upsert_final_item(candidate, target_name)
+
+        print(f"target={target}")
+        print(f"best_score={score}")
+        print(f"matched_existing_id={existing_item.get('id')}")
+        print(f"outcome={outcome}")
+        print(patch.stdout.strip())
+
+    finally:
+        try:
+            existing_tmp.unlink()
+        except Exception:
+            pass
+
+===== FILE: scripts/run_full_memory_pipeline.py =====
+import argparse
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+LOGS_DIR = WORKSPACE / ".memory-index" / "logs"
+
+CHECKPOINT = SCRIPTS_DIR / "checkpoint_agent.py"
+MAINTENANCE = SCRIPTS_DIR / "run_memory_maintenance_cycle.py"
+SYNC_MARKDOWN = SCRIPTS_DIR / "sync_registry_to_markdown.py"
+
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def run_capture(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--reason", default="full memory pipeline run")
+    parser.add_argument("--force-maintenance", action="store_true")
+    args = parser.parse_args()
+
+    ts = now_iso().replace(":", "-")
+    run_dir = LOGS_DIR / f"full-pipeline-{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_out = run_capture([
+        "python3",
+        str(CHECKPOINT),
+        "--agent",
+        args.agent,
+        "--reason",
+        args.reason,
+    ])
+    (run_dir / "checkpoint_output.txt").write_text(checkpoint_out + "\n", encoding="utf-8")
+
+    maintenance_cmd = ["python3", str(MAINTENANCE)]
+    if args.force_maintenance:
+        maintenance_cmd.append("--force")
+
+    maintenance_out = run_capture(maintenance_cmd)
+    (run_dir / "maintenance_output.txt").write_text(maintenance_out + "\n", encoding="utf-8")
+
+    sync_out = run_capture([
+        "python3",
+        str(SYNC_MARKDOWN),
+    ])
+    (run_dir / "sync_output.txt").write_text(sync_out + "\n", encoding="utf-8")
+
+    print("FULL_MEMORY_PIPELINE_COMPLETE")
+    print(f"log_dir={run_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/run_memory_maintenance_cycle.py =====
+import argparse
+import json
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+LOGS_DIR = WORKSPACE / ".memory-index" / "logs"
+REVIEW_DIR = WORKSPACE / "memory" / "review"
+DECISIONS_LOG = REVIEW_DIR / "decisions.log"
+STATE_FILE = LOGS_DIR / "maintenance-cycle-state.json"
+
+APPLY_FEEDBACK = SCRIPTS_DIR / "apply_feedback_actions.py"
+REPORT_MAINT = SCRIPTS_DIR / "report_memory_maintenance.py"
+REPORT_FEEDBACK = SCRIPTS_DIR / "report_feedback_actions.py"
+SHOW_TOP = SCRIPTS_DIR / "show_top_retrieved.py"
+SHOW_LOW = SCRIPTS_DIR / "show_low_utility_retrievals.py"
+SHOW_DEMOTION = SCRIPTS_DIR / "show_demotion_candidates.py"
+SHOW_PROMOTION = SCRIPTS_DIR / "show_promotion_candidates.py"
+
+AUTO_PROMOTE = SCRIPTS_DIR / "auto_promote_safe_items.py"
+SYNC_MARKDOWN = SCRIPTS_DIR / "sync_registry_to_markdown.py"
+
+SHOW_CONFLICTS = SCRIPTS_DIR / "show_conflict_candidates.py"
+CREATE_RESTORE_POINT = SCRIPTS_DIR / "create_memory_restore_point.py"
+
+WATCH_FILES = [
+    REVIEW_DIR / "retrieval-feedback.jsonl",
+    REVIEW_DIR / "canonical-items.jsonl",
+    REVIEW_DIR / "canonical-superseded.jsonl",
+    REVIEW_DIR / "inbox.jsonl",
+    REVIEW_DIR / "auto.jsonl",
+    REVIEW_DIR / "discarded.jsonl",
+]
+
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def run_capture(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def append_log(line: str):
+    with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def file_signature(path: Path):
+    if not path.exists():
+        return {"exists": False, "mtime_ns": 0, "size": 0}
+    stat = path.stat()
+    return {
+        "exists": True,
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
+
+
+def current_state():
+    return {str(path): file_signature(path) for path in WATCH_FILES}
+
+
+def load_previous_state():
+    if not STATE_FILE.exists():
+        return None
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def save_state(state: dict):
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+
+    current = current_state()
+    previous = load_previous_state()
+
+    if previous == current and not args.force:
+        append_log(f"{now_iso()} maintenance_cycle skipped reason=no-meaningful-change")
+        print("MAINTENANCE_CYCLE_SKIPPED")
+        print("reason=no-meaningful-change")
+        return
+
+    ts = now_iso().replace(":", "-")
+    cycle_dir = LOGS_DIR / f"maintenance-cycle-{ts}"
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+
+    restore_out = run_capture([
+        "python3",
+        str(CREATE_RESTORE_POINT),
+        "--label",
+        "pre-maintenance",
+    ])
+    (cycle_dir / "restore_point_output.txt").write_text(restore_out + "\n", encoding="utf-8")
+
+
+    apply_out = run_capture(["python3", str(APPLY_FEEDBACK)])
+    (cycle_dir / "apply_feedback_actions.txt").write_text(apply_out + "\n", encoding="utf-8")
+
+    promote_out = run_capture(["python3", str(AUTO_PROMOTE)])
+    (cycle_dir / "auto_promote_safe_items.txt").write_text(promote_out + "\n", encoding="utf-8")
+
+    sync_out = run_capture(["python3", str(SYNC_MARKDOWN)])
+    (cycle_dir / "sync_registry_to_markdown.txt").write_text(sync_out + "\n", encoding="utf-8")
+
+    maint_out = run_capture(["python3", str(REPORT_MAINT)])
+    (cycle_dir / "memory_maintenance_report.txt").write_text(maint_out + "\n", encoding="utf-8")
+
+    feedback_out = run_capture(["python3", str(REPORT_FEEDBACK)])
+    (cycle_dir / "feedback_actions_report.txt").write_text(feedback_out + "\n", encoding="utf-8")
+
+    top_out = run_capture(["python3", str(SHOW_TOP)])
+    (cycle_dir / "top_retrieved.txt").write_text(top_out + "\n", encoding="utf-8")
+
+    low_out = run_capture(["python3", str(SHOW_LOW)])
+    (cycle_dir / "low_utility_retrievals.txt").write_text(low_out + "\n", encoding="utf-8")
+
+    demotion_out = run_capture(["python3", str(SHOW_DEMOTION)])
+    (cycle_dir / "demotion_candidates.txt").write_text(demotion_out + "\n", encoding="utf-8")
+
+    promotion_out = run_capture(["python3", str(SHOW_PROMOTION)])
+    (cycle_dir / "promotion_candidates.txt").write_text(promotion_out + "\n", encoding="utf-8")
+
+    conflict_out = run_capture(["python3", str(SHOW_CONFLICTS)])
+    (cycle_dir / "conflict_candidates.txt").write_text(conflict_out + "\n", encoding="utf-8")
+
+    save_state(current_state())
+
+    append_log(f"{now_iso()} maintenance_cycle completed dir={cycle_dir}")
+
+    if args.force:
+        print("mode=forced")
+    print("MAINTENANCE_CYCLE_COMPLETE")
+    print(f"log_dir={cycle_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/refresh_agent_memory.py =====
+import argparse
+import json
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+from project_memory_paths import (
+    get_project_current_file,
+    get_latest_project_daily_file,
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from memory_refresh_config import (
+    get_agent_memory_paths,
+    get_agent_refresh_interval,
+)
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+LOGS_DIR = WORKSPACE / ".memory-index" / "logs"
+STATE_FILE = LOGS_DIR / "agent-memory-refresh-state.json"
+
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def file_mtime(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def tracked_event_files(project_id: str | None):
+    files = []
+    if not project_id:
+        return files
+
+    from project_memory_paths import (
+        get_project_current_file,
+        get_latest_project_daily_file,
+        get_project_summary_file,
+    )
+
+    current_file = get_project_current_file(project_id)
+    latest_daily = get_latest_project_daily_file(project_id)
+    summary_file = get_project_summary_file(project_id)
+
+    files.append(current_file)
+    if latest_daily is not None:
+        files.append(latest_daily)
+    files.append(summary_file)
+
+    return files
+
+
+def build_event_state(project_id: str | None):
+    state = {}
+    for path in tracked_event_files(project_id):
+        state[str(path)] = file_mtime(path)
+    return state
+
+
+def event_triggered(old_state: dict, new_state: dict) -> bool:
+    for path, new_mtime in new_state.items():
+        old_mtime = float(old_state.get(path, 0))
+        if new_mtime > old_mtime:
+            return True
+    return False
+
+def save_state(state: dict):
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def latest_daily_file():
+    daily_dir = WORKSPACE / "memory" / "daily"
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    files = sorted(daily_dir.glob("*.md"))
+    if not files:
+        return None
+    return files[-1]
+
+
+def resolve_memory_path_token(token):
+    if token == "__LATEST_DAILY__":
+        return latest_daily_file()
+    return Path(token)
+
+def read_memory_bundle(agent_name: str, project_id: str | None = None):
+    bundle = []
+
+    for raw_path in get_agent_memory_paths(agent_name):
+        raw_name = str(raw_path)
+
+        if raw_name == "__LATEST_DAILY__":
+            resolved = latest_daily_file()
+            if resolved is None:
+                bundle.append({
+                    "file": "__LATEST_DAILY__",
+                    "exists": False,
+                    "content": "",
+                })
+                continue
+            path = resolved
+
+        elif raw_name == "__PROJECT_CURRENT__":
+            if not project_id:
+                bundle.append({
+                    "file": "__PROJECT_CURRENT__",
+                    "exists": False,
+                    "content": "",
+                })
+                continue
+            path = get_project_current_file(project_id)
+
+        elif raw_name == "__PROJECT_LATEST_DAILY__":
+            if not project_id:
+                bundle.append({
+                    "file": "__PROJECT_LATEST_DAILY__",
+                    "exists": False,
+                    "content": "",
+                })
+                continue
+            resolved = get_latest_project_daily_file(project_id)
+            if resolved is None:
+                bundle.append({
+                    "file": "__PROJECT_LATEST_DAILY__",
+                    "exists": False,
+                    "content": "",
+                })
+                continue
+            path = resolved
+
+        else:
+            path = raw_path
+
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        else:
+            text = ""
+
+        bundle.append({
+            "file": str(path),
+            "exists": path.exists(),
+            "content": text,
+        })
+
+    return bundle
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project-id")
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+
+    state = load_state()
+    agent_state = state.get(args.agent, {})
+    interval = get_agent_refresh_interval(args.agent)
+
+    now = datetime.now(timezone.utc).timestamp()
+    last_ts = float(agent_state.get("last_refresh_ts", 0))
+
+    old_event_state = agent_state.get("event_files", {})
+    new_event_state = build_event_state(args.project_id)
+
+    interval_elapsed = (now - last_ts) >= interval
+    event_changed = event_triggered(old_event_state, new_event_state)
+
+    if not args.force and not interval_elapsed and not event_changed:
+        remaining = int(interval - (now - last_ts))
+        print("SKIPPED")
+        print("reason=interval_not_elapsed_and_no_event_change")
+        print(f"agent={args.agent}")
+        print(f"seconds_remaining={remaining}")
+        return
+
+    bundle = read_memory_bundle(args.agent, args.project_id)
+
+    agent_state = {
+        "last_refresh_ts": now,
+        "last_refresh_at": now_iso(),
+        "interval_seconds": interval,
+        "project_id": args.project_id,
+        "event_files": new_event_state,
+        "refresh_trigger": "force" if args.force else ("event" if event_changed and not interval_elapsed else "interval"),
+        "files": [x["file"] for x in bundle],
+    }
+    state[args.agent] = agent_state
+    save_state(state)
+
+    print("REFRESHED")
+    print(f"agent={args.agent}")
+    print(f"interval_seconds={interval}")
+    print(f"files={len(bundle)}")
+ 
+    print(f"trigger={agent_state.get('refresh_trigger')}")
+
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: scripts/heartbeat_refresh_agent_memory.py =====
+import argparse
+import subprocess
+from pathlib import Path
+
+WORKSPACE = Path.home() / ".openclaw" / "workspace"
+SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
+REFRESH_SCRIPT = SCRIPTS_DIR / "refresh_agent_memory.py"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+
+    cmd = [
+        "python3",
+        str(REFRESH_SCRIPT),
+        "--agent",
+        args.agent,
+    ]
+    if args.force:
+        cmd.append("--force")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    print(result.stdout.strip())
+
+
+if __name__ == "__main__":
+    main()

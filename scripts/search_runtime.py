@@ -1,68 +1,39 @@
-from typing import Any
-import os
-import httpx
-import argparse
-import json
+from __future__ import annotations
+
 import math
-import sys
 from pathlib import Path
+from typing import Any
 
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from memory_db import hybrid_search_memory_items, close_pool
-from vector_store_qdrant import search_memory_vectors
 from extract_memory_fields import extract_fields
 from graph_store_neo4j import get_neo4j_driver
+from memory_db import close_pool, hybrid_search_memory_items
+from vector_store_qdrant import search_memory_vectors
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
 
-SEARCH_SERVICE_URL = os.environ.get("OPENCLAW_SEARCH_SERVICE_URL", "http://127.0.0.1:8791")
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-def sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-float(x)))
+_EMBED_MODEL: SentenceTransformer | None = None
+_RERANK_MODEL: CrossEncoder | None = None
 
-def search_via_service(query: str, top_k: int = 8) -> list[dict[str, Any]] | None:
-    try:
-        r = httpx.get(
-            f"{SEARCH_SERVICE_URL}/search",
-            params={"query": query, "top_k": top_k},
-            timeout=30,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if not data.get("ok"):
-            return None
-        return data.get("results", [])
-    except Exception:
-        return None
 
-def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
-    if not rows:
-        return rows
+def get_embed_model() -> SentenceTransformer:
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        _EMBED_MODEL = SentenceTransformer(MODEL_NAME)
+    return _EMBED_MODEL
 
-    rows.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
 
-    head = rows[:top_n]
-    tail = rows[top_n:]
+def get_rerank_model() -> CrossEncoder:
+    global _RERANK_MODEL
+    if _RERANK_MODEL is None:
+        _RERANK_MODEL = CrossEncoder(RERANK_MODEL_NAME)
+    return _RERANK_MODEL
 
-    model = CrossEncoder(RERANK_MODEL_NAME)
-    pairs = [[query, row["text"]] for row in head]
-    raw_scores = model.predict(pairs)
-
-    for row, raw in zip(head, raw_scores):
-        row["rerank_raw"] = float(raw)
-        row["rerank_score"] = sigmoid(float(raw))
-        row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
-
-    head.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
-    return head + tail
 
 def collect_project_sources(project_id: str | None):
     if not project_id:
@@ -109,6 +80,23 @@ def collect_project_sources(project_id: str | None):
                     "text": s,
                     "mtime": mtime,
                 }
+
+
+def simple_project_score(query: str, text: str, source_type: str) -> float:
+    q_terms = [x.lower() for x in query.split() if x.strip()]
+    t = (text or "").lower()
+    raw_hits = sum(1 for term in q_terms if term in t)
+
+    base = raw_hits * 0.30
+
+    if source_type == "project_current":
+        base += 0.12
+    elif source_type == "project_milestone":
+        base += 0.07
+    elif source_type == "project_daily":
+        base += 0.03
+
+    return base
 
 
 def search_graph_memory(entity: str | None, prop: str | None) -> list[dict]:
@@ -168,46 +156,45 @@ def search_graph_memory(entity: str | None, prop: str | None) -> list[dict]:
     driver.close()
     return out
 
-def simple_project_score(query: str, text: str, source_type: str) -> float:
-    q_terms = [x.lower() for x in query.split() if x.strip()]
-    t = (text or "").lower()
-    raw_hits = sum(1 for term in q_terms if term in t)
 
-    base = raw_hits * 0.30
-
-    if source_type == "project_current":
-        base += 0.12
-    elif source_type == "project_milestone":
-        base += 0.07
-    elif source_type == "project_daily":
-        base += 0.03
-
-    return base
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-float(x)))
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--query", required=True)
-    parser.add_argument("--project-id")
-    parser.add_argument("--top-k", type=int, default=8)
-    args = parser.parse_args()
+def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
+    if not rows:
+        return rows
 
-    service_rows = search_via_service(args.query, getattr(args, "top_k", 8))
-    if service_rows is not None:
-        for row in service_rows:
-            print(json.dumps(row, ensure_ascii=False))
-        return
+    rows.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
 
-    model = SentenceTransformer(MODEL_NAME)
+    head = rows[:top_n]
+    tail = rows[top_n:]
+
+    model = get_rerank_model()
+    pairs = [[query, row["text"]] for row in head]
+    raw_scores = model.predict(pairs)
+
+    for row, raw in zip(head, raw_scores):
+        row["rerank_raw"] = float(raw)
+        row["rerank_score"] = sigmoid(float(raw))
+        row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
+
+    head.sort(key=lambda x: (-x["score"], -x.get("mtime", 0), x["source_type"], x["path"]))
+    return head + tail
+
+
+def run_search(query: str, top_k: int = 8, project_id: str | None = None) -> list[dict]:
+    model = get_embed_model()
     query_embedding = model.encode(
-        args.query,
+        query,
         normalize_embeddings=True,
         convert_to_numpy=True,
     )
+
     scored = []
     seen = set()
 
-    query_fields = extract_fields(args.query)
+    query_fields = extract_fields(query)
     graph_hits = search_graph_memory(
         query_fields.get("entity"),
         query_fields.get("property"),
@@ -215,7 +202,7 @@ def main():
 
     canonical_items = hybrid_search_memory_items(
         query_embedding,
-        query_text=args.query,
+        query_text=query,
         status="active",
         allowed_sensitivities=["public", "internal"],
         limit=50,
@@ -235,7 +222,6 @@ def main():
         )
 
     qdrant_hits = search_memory_vectors(query_embedding, limit=20)
-
     for hit in qdrant_hits:
         payload = hit.payload or {}
         text = payload.get("text") or ""
@@ -278,30 +264,23 @@ def main():
             }
         )
 
-    for src in collect_project_sources(args.project_id):
-        score = simple_project_score(args.query, src["text"], src["source_type"])
+    for src in collect_project_sources(project_id):
+        score = simple_project_score(query, src["text"], src["source_type"])
         if score > 0:
             row = dict(src)
             row["score"] = float(score)
             scored.append(row)
 
-    scored = rerank_rows(args.query, scored, top_n=min(12, len(scored)))
+    scored = rerank_rows(query, scored, top_n=min(12, len(scored)))
 
-    if not scored:
-        print("NONE")
-        close_pool()
-        return
-
-    for row in scored[: args.top_k]:
-        print(json.dumps({
-            "score": row["score"],
-            "source_type": row["source_type"],
-            "path": row["path"],
-            "text": row["text"],
-        }, ensure_ascii=False))
-
-    close_pool()
-
-
-if __name__ == "__main__":
-    main()
+    out = []
+    for row in scored[:top_k]:
+        out.append(
+            {
+                "score": row["score"],
+                "source_type": row["source_type"],
+                "path": row["path"],
+                "text": row["text"],
+            }
+        )
+    return out

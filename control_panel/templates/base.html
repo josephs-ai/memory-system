@@ -17,6 +17,7 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
       <a class="nav-link {% if page=='architecture' or page=='architecture_node' %}active{% endif %}" href="/architecture">Memory Graph</a>
       <a class="nav-link {% if page=='commands' %}active{% endif %}" href="/commands">Commands</a>
       <a class="nav-link {{ "active" if page == "search" else "" }}" href="/search">Search</a>
+      <a class="nav-link {{ "active" if page == "checkpoints" else "" }}" href="/checkpoints">Checkpoints</a>
     </div>
 
     <div class="hero">
@@ -234,7 +235,138 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
     </div>
     {% endif %}
 
-    {% if page == "agents" %}
+    
+    {% if page == "checkpoints" %}
+    <div class="grid">
+      <div class="card span-4">
+        <h2>Heartbeat worker</h2>
+        <p><span class="pill gray">running: {{ heartbeat_worker_status.running }}</span></p>
+        <p class="muted">PID: {{ heartbeat_worker_status.pid }}</p>
+        <p class="muted">Latest committed checkpoint: {{ heartbeat_worker_status.latest_committed_checkpoint_id }}</p>
+        <p class="muted">Last finished: {{ heartbeat_worker_status.last_checkpoint_finished_at }}</p>
+      </div>
+
+      <div class="card span-4">
+        <h2>Tracked path watcher</h2>
+        <p><span class="pill gray">running: {{ tracked_path_watcher_status.running }}</span></p>
+        <p class="muted">PID: {{ tracked_path_watcher_status.pid }}</p>
+        <p class="muted">Watch count: {{ tracked_path_watcher_status.watcher_watch_count }}</p>
+        <p class="muted">Last flush: {{ tracked_path_watcher_status.watcher_last_flush_at_iso or tracked_path_watcher_status.watcher_last_flush_at }}</p>
+      </div>
+
+      <div class="card span-4">
+        <h2>Latest checkpoint</h2>
+        {% if latest_checkpoint %}
+        <p><span class="pill gray">{{ latest_checkpoint.status }}</span></p>
+        <p class="muted">ID: {{ latest_checkpoint.id }}</p>
+        <p class="muted">Trigger: {{ latest_checkpoint.trigger_type }}</p>
+        <p class="muted">Reason: {{ latest_checkpoint.trigger_reason }}</p>
+        {% else %}
+        <p class="muted">No checkpoints yet.</p>
+        {% endif %}
+      </div>
+
+      <div class="card span-12">
+        <h2>Recent checkpoints</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Trigger</th>
+              <th>Reason</th>
+              <th>Started</th>
+              <th>Finished</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in recent_checkpoints %}
+            <tr>
+              <td>{{ row.id }}</td>
+              <td>{{ row.status }}</td>
+              <td>{{ row.trigger_type }}</td>
+              <td>{{ row.trigger_reason }}</td>
+              <td>{{ row.started_at }}</td>
+              <td>{{ row.finished_at or "-" }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6">No checkpoints recorded yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    
+{% if page == "heartbeat" %}
+<div class="grid">
+  <div class="card span-6">
+    <h2>Heartbeat worker</h2>
+    <p><span class="pill gray">running: {{ heartbeat_worker_status.running }}</span></p>
+    <p class="muted">PID: {{ heartbeat_worker_status.pid }}</p>
+    <p class="muted">Latest committed checkpoint: {{ heartbeat_worker_status.latest_committed_checkpoint_id }}</p>
+    <p class="muted">Last finished: {{ heartbeat_worker_status.last_checkpoint_finished_at }}</p>
+    <p class="muted">Effective interval: {{ heartbeat_tuning_state.effective_interval }}</p>
+    <form method="post" action="/stack/run-script">
+      <input type="hidden" name="script_name" value="ensure_heartbeat_worker.py">
+      <button type="submit">Ensure heartbeat worker</button>
+    </form>
+  </div>
+
+  <div class="card span-6">
+    <h2>Tracked path watcher</h2>
+    <p><span class="pill gray">running: {{ tracked_path_watcher_status.running }}</span></p>
+    <p class="muted">PID: {{ tracked_path_watcher_status.pid }}</p>
+    <p class="muted">Watch count: {{ tracked_path_watcher_status.watcher_watch_count }}</p>
+    <p class="muted">Last flush: {{ tracked_path_watcher_status.watcher_last_flush_at_iso or tracked_path_watcher_status.watcher_last_flush_at }}</p>
+    <form method="post" action="/stack/run-script">
+      <input type="hidden" name="script_name" value="ensure_tracked_path_watcher.py">
+      <button type="submit">Ensure watcher</button>
+    </form>
+  </div>
+
+  <div class="card span-12">
+    <h2>Heartbeat tuning snapshot</h2>
+    <pre>{{ heartbeat_tuning_state.heartbeat_tuning | tojson(indent=2) }}</pre>
+  </div>
+</div>
+{% endif %}
+
+
+{% if page == "services" %}
+<div class="grid">
+  <div class="card span-12">
+    <h2>Memory stack launcher</h2>
+    <form method="post" action="/stack/action" style="display:inline-block; margin-right: 8px;">
+      <input type="hidden" name="action" value="ensure_memory_stack">
+      <button type="submit">Start / ensure full stack</button>
+    </form>
+    <form method="post" action="/stack/action" style="display:inline-block;">
+      <input type="hidden" name="action" value="stop_memory_stack">
+      <button type="submit">Stop full stack</button>
+    </form>
+    <p class="muted">Starts or verifies watcher, heartbeat worker, and hot search service together.</p>
+  </div>
+
+  <div class="card span-4">
+    <h2>Watcher</h2>
+    <pre>{{ tracked_path_watcher_status | tojson(indent=2) }}</pre>
+  </div>
+
+  <div class="card span-4">
+    <h2>Heartbeat</h2>
+    <pre>{{ heartbeat_worker_status | tojson(indent=2) }}</pre>
+  </div>
+
+  <div class="card span-4">
+    <h2>Search Service</h2>
+    <pre>{{ search_service_status | tojson(indent=2) }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{% if page == "agents" %}
     <div class="grid">
       <div class="card span-8">
         <h2>Agent registry</h2>
