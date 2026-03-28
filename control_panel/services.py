@@ -6,6 +6,8 @@ import psycopg
 from collections import defaultdict
 from typing import Any
 
+from orchestrator.operator_status_summary import build_operator_summary, recent_milestone_operator_summaries
+
 from config import CONFIG_PATH, CONTROL_PANEL_DIR, DEFAULT_CONFIG, PROJECTS_DIR, SCRIPTS_DIR
 from data_architecture import ARCHITECTURE_CROSS_EDGES, ARCHITECTURE_TREES
 
@@ -196,4 +198,56 @@ def memory_status_counts() -> dict[str, int]:
         "discarded_queue": db_scalar("SELECT COUNT(*) FROM memory_discarded"),
         "embedding_rows": db_scalar("SELECT COUNT(*) FROM memory_item_embeddings"),
         "retrieval_feedback_rows": db_scalar("SELECT COUNT(*) FROM retrieval_feedback"),
+    }
+
+
+def project_db_rows(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+    try:
+        with psycopg.connect(get_db_dsn()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def orchestrator_operator_overview(limit: int = 6) -> dict[str, Any]:
+    rows = project_db_rows(
+        """
+        SELECT
+            work_id,
+            title,
+            status,
+            next_action,
+            COALESCE(metadata_json, '{}'::jsonb) AS metadata_json
+        FROM work_items
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    work_items = []
+    for row in rows:
+        metadata = dict(row.get("metadata_json") or {})
+        work_items.append(
+            {
+                "work_id": row.get("work_id"),
+                "title": row.get("title"),
+                "status": row.get("status"),
+                "next_action": row.get("next_action"),
+                "summary": build_operator_summary(
+                    work_context={
+                        "metadata_json": metadata,
+                        "execution_rollup": metadata.get("execution_rollup") or {},
+                        "execution_governance": metadata.get("execution_governance") or {},
+                        "next_action": row.get("next_action"),
+                    }
+                ),
+            }
+        )
+
+    return {
+        "work_items": work_items,
+        "milestones": recent_milestone_operator_summaries(limit=4),
     }

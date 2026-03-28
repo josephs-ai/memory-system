@@ -1,4 +1,3 @@
-cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'EOF'
 <!doctype html>
 <html>
 <head>
@@ -85,6 +84,44 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
             <button type="submit">Run maintenance</button>
           </form>
         </div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="card span-6">
+        <h2>Orchestrator work-item truth surface</h2>
+        <ul class="clean">
+          {% for item in operator_overview.work_items %}
+          <li>
+            <strong>{{ item.title }}</strong><br>
+            <span class="pill gray">{{ item.status }}</span>
+            <span class="pill gray">next: {{ item.next_action }}</span>
+            <span class="pill {% if item.summary.readiness == 'healthy' %}success{% elif item.summary.readiness.startswith('blocked') or item.summary.readiness == 'repair_bundle_active' %}error{% else %}gray{% endif %}">{{ item.summary.readiness }}</span><br>
+            <span class="muted">proof: {{ item.summary.proof_status }} · execution: {{ item.summary.execution_status }} · blocker: {{ item.summary.primary_blocker or '-' }}</span><br>
+            <span class="muted">repair: {{ item.summary.active_repair_mode or '-' }} · retarget: {{ item.summary.active_retarget_mode or '-' }}</span>
+            {% if item.summary.repair_bundle_summary %}<br><span class="muted">bundle: {{ item.summary.repair_bundle_summary }}</span>{% endif %}
+          </li>
+          {% else %}
+          <li>No recent work items.</li>
+          {% endfor %}
+        </ul>
+      </div>
+
+      <div class="card span-6">
+        <h2>Milestone truth surface</h2>
+        <ul class="clean">
+          {% for item in operator_overview.milestones %}
+          <li>
+            <strong>{{ item.title or item.milestone_id }}</strong><br>
+            <span class="pill gray">{{ item.summary.readiness }}</span>
+            <span class="muted">healthy: {{ item.summary.healthy_execution_backed_count }}/{{ item.summary.feature_count }}</span><br>
+            <span class="muted">validation: {{ item.summary.blocked_validation_count }} · code: {{ item.summary.blocked_code_repair_count }} · plan: {{ item.summary.blocked_plan_recovery_count }}</span><br>
+            <span class="muted">blocker: {{ item.summary.primary_blocker or '-' }} · bundles: {{ item.summary.bundle_modes_active|join(', ') if item.summary.bundle_modes_active else '-' }}</span>
+          </li>
+          {% else %}
+          <li>No recent milestone artifacts.</li>
+          {% endfor %}
+        </ul>
       </div>
     </div>
 
@@ -686,4 +723,3 @@ cat > ~/.openclaw/workspace/.memory-index/control_panel/templates/base.html <<'E
 
 </body>
 </html>
-EOF

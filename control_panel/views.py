@@ -31,6 +31,7 @@ from services import (
     get_all_script_files,
     load_config,
     memory_status_counts,
+    orchestrator_operator_overview,
     project_summaries,
     save_config,
     script_inventory_groups,
@@ -214,6 +215,7 @@ def render(
         "heartbeat_modes": HEARTBEAT_MODES,
         "projects": project_summaries(),
         "db_counts": memory_status_counts(),
+        "operator_overview": orchestrator_operator_overview(),
         "last_output": LAST_OUTPUT or "No command run yet.",
     }
 
