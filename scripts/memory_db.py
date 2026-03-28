@@ -6,7 +6,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
-DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=postgres")
+DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
 
 POOL = ConnectionPool(
     conninfo=DEFAULT_DSN,
@@ -111,6 +111,19 @@ def normalize_memory_item(item: dict) -> dict:
             if value is None:
                 value = [] if col in {"tags", "candidate_reasons"} else {}
             value = Jsonb(value)
+
+        elif col == "importance":
+            raw = item.get("importance", item.get("retention_priority", value))
+            try:
+                value = float(raw) if raw is not None and raw != "" else 0.0
+            except (TypeError, ValueError):
+                value = 0.0
+
+        elif col == "confidence":
+            try:
+                value = float(value) if value is not None and value != "" else 0.0
+            except (TypeError, ValueError):
+                value = 0.0
 
         elif col == "status":
             value = value or "active"

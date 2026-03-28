@@ -23,6 +23,9 @@ if str(ROOT) not in sys.path:
 from checkpoint_db import close_pool
 from memory_db import search_memory_items_by_terms
 from graph_search_adapter import search_graph_text
+from memory_retrieval_contract import build_memory_pack
+from memory_routing_models import WorkItemMemoryMetadata
+from orchestrator_context_core import fetch_orchestrator_context
 from qdrant_search_adapter import search_qdrant_text
 
 LOGGER = logging.getLogger("openclaw.search_service")
@@ -61,6 +64,17 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
     meta: dict[str, Any]
+
+
+class OrchestratorContextRequest(BaseModel):
+    project_id: str | None = None
+    subproject_id: str | None = None
+    role: str
+    mode: str = "normal"
+    work_id: str
+    kind: str = "task"
+    tags: list[str] = Field(default_factory=list)
+    limit: int = Field(default=6, ge=1, le=50)
 
 
 class SourceCircuit:
@@ -247,6 +261,24 @@ app = FastAPI(
 )
 
 
+def build_meta(top_k: int, project_id: str | None) -> dict[str, Any]:
+    return {
+        "runtime": "search_runtime",
+        "top_k": top_k,
+        "project_id": project_id,
+    }
+
+
+def build_search_work_item_metadata(project_id: str | None, subproject_id: str | None = None) -> WorkItemMemoryMetadata:
+    return WorkItemMemoryMetadata(
+        project_id=project_id or "global",
+        subproject_id=subproject_id,
+        inherited_memory_refs=[],
+        promoted_memory_refs=[],
+        local_memory_refs=[],
+    )
+
+
 async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     embed_model: SentenceTransformer = app.state.embed_model
     reranker: CrossEncoder = app.state.reranker
@@ -255,7 +287,13 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
     started = time.perf_counter()
 
     embed_started = time.perf_counter()
-    query_vec = await run_in_executor(app.state.model_executor, embed_model.encode, query, True)
+    query_vec = await run_in_executor(
+        app.state.model_executor,
+        embed_model.encode,
+        query,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
     if hasattr(query_vec, "tolist"):
         query_vec = query_vec.tolist()
     embed_ms = round((time.perf_counter() - embed_started) * 1000, 2)
@@ -382,3 +420,38 @@ async def search_post(req: SearchRequest):
     except Exception:
         LOGGER.exception("search_request_failed query=%r", req.query)
         raise HTTPException(status_code=500, detail="search_service_internal_error")
+
+
+@app.post("/orchestrator/context")
+async def orchestrator_context(req: OrchestratorContextRequest):
+    try:
+        project_id = req.project_id or "global"
+        raw = fetch_orchestrator_context(
+            project_id=project_id,
+            subproject_id=req.subproject_id,
+            role=req.role,
+            mode=req.mode,
+            work_id=req.work_id,
+            kind=req.kind,
+            tags=req.tags,
+            limit=req.limit,
+        )
+
+        work_item = build_search_work_item_metadata(project_id, req.subproject_id)
+        pack = build_memory_pack(
+            role=req.role,
+            work_item=work_item,
+            parent_refs=raw.get("selected_refs", []),
+            subproject_refs=[],
+            project_refs=[],
+        )
+
+        return {
+            "ok": True,
+            "context": raw,
+            "memory_pack": pack.model_dump(),
+            "meta": build_meta(req.limit, project_id),
+        }
+    except Exception:
+        LOGGER.exception("orchestrator_context_failed work_id=%r", req.work_id)
+        raise HTTPException(status_code=500, detail="orchestrator_context_internal_error")

@@ -161,6 +161,23 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-float(x)))
 
 
+def encode_query_embedding(model: SentenceTransformer, query: str):
+    try:
+        return model.encode(
+            query,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+    except ValueError as e:
+        if "Prompt name 'True' not found" not in str(e):
+            raise
+        return model.encode(
+            sentences=query,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+
+
 def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
     if not rows:
         return rows
@@ -185,11 +202,7 @@ def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
 
 def run_search(query: str, top_k: int = 8, project_id: str | None = None) -> list[dict]:
     model = get_embed_model()
-    query_embedding = model.encode(
-        query,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-    )
+    query_embedding = encode_query_embedding(model, query)
 
     scored = []
     seen = set()
