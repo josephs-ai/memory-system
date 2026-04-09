@@ -6,35 +6,140 @@ from typing import Any
 import psycopg
 
 
-ROLE_MEMORY_TYPES = {
-    "builder": [
-        "implementation_pattern",
-        "architecture_rule",
-        "project_summary",
-        "subsystem_summary",
-        "feature_summary",
-        "guardrail",
-    ],
-    "reviewer": [
-        "review_finding",
-        "decision_record",
-        "architecture_rule",
-        "guardrail",
-        "workflow_rule",
-    ],
-    "tester": [
-        "test_outcome",
-        "bug_history",
-        "validation_pattern",
-        "workflow_rule",
-        "guardrail",
-    ],
-    "writeback": [
-        "project_summary",
-        "subsystem_summary",
-        "feature_summary",
-    ],
+CONTRACT_VERSION = "2026-04-09.memory-runtime-truth.v1"
+GLOBAL_FALLBACK_SCOPES = ("global", "archive")
+ROLE_RETRIEVAL_CONTRACTS: dict[str, dict[str, Any]] = {
+    "builder": {
+        "preferred_types": [
+            "implementation_pattern",
+            "architecture_rule",
+            "project_summary",
+            "subsystem_summary",
+            "feature_summary",
+            "guardrail",
+            "decision",
+            "decision_record",
+        ],
+        "eligible_categories": [
+            "implementation_pattern",
+            "architecture_rule",
+            "project_summary",
+            "subproject_summary",
+            "guardrail",
+            "decision",
+            "recent_change",
+        ],
+        "eligible_types": [
+            "implementation_pattern",
+            "architecture_rule",
+            "project_summary",
+            "subsystem_summary",
+            "feature_summary",
+            "guardrail",
+            "decision",
+            "decision_record",
+        ],
+    },
+    "reviewer": {
+        "preferred_types": [
+            "review_finding",
+            "decision_record",
+            "architecture_rule",
+            "guardrail",
+            "workflow_rule",
+            "bug_history",
+            "decision",
+            "feature_summary",
+        ],
+        "eligible_categories": [
+            "review_finding",
+            "architecture_rule",
+            "guardrail",
+            "workflow_rule",
+            "bug_history",
+            "decision",
+            "recent_change",
+        ],
+        "eligible_types": [
+            "review_finding",
+            "decision_record",
+            "architecture_rule",
+            "guardrail",
+            "workflow_rule",
+            "bug_history",
+            "decision",
+            "feature_summary",
+            "subsystem_summary",
+        ],
+    },
+    "tester": {
+        "preferred_types": [
+            "test_outcome",
+            "bug_history",
+            "validation_pattern",
+            "workflow_rule",
+            "guardrail",
+            "decision",
+            "review_finding",
+        ],
+        "eligible_categories": [
+            "test_outcome",
+            "bug_history",
+            "validation_pattern",
+            "workflow_rule",
+            "guardrail",
+            "recent_change",
+        ],
+        "eligible_types": [
+            "test_outcome",
+            "bug_history",
+            "validation_pattern",
+            "workflow_rule",
+            "guardrail",
+            "decision",
+            "review_finding",
+        ],
+    },
+    "writeback": {
+        "preferred_types": [
+            "project_summary",
+            "subsystem_summary",
+            "feature_summary",
+            "decision",
+            "test_outcome",
+            "bug_history",
+        ],
+        "eligible_categories": [
+            "project_summary",
+            "subproject_summary",
+            "decision",
+            "test_outcome",
+            "bug_history",
+            "recent_change",
+        ],
+        "eligible_types": [
+            "project_summary",
+            "subsystem_summary",
+            "feature_summary",
+            "decision",
+            "decision_record",
+            "test_outcome",
+            "bug_history",
+            "review_finding",
+        ],
+    },
 }
+
+
+def _contract_for_role(role: str) -> dict[str, Any]:
+    return ROLE_RETRIEVAL_CONTRACTS.get(
+        role,
+        {
+            "preferred_types": ["project_summary", "architecture_rule", "guardrail", "decision"],
+            "eligible_categories": ["project_summary", "architecture_rule", "guardrail", "decision", "recent_change"],
+            "eligible_types": ["project_summary", "architecture_rule", "guardrail", "decision", "decision_record"],
+        },
+    )
 
 
 def _get_dsn() -> str:
@@ -42,6 +147,83 @@ def _get_dsn() -> str:
     if not dsn:
         raise RuntimeError("OPENCLAW_MEMORY_DB_DSN or DB is not set")
     return dsn
+
+
+def _scope_plan(project_id: str, subproject_id: str | None) -> tuple[list[str], list[str]]:
+    primary: list[str] = []
+    if subproject_id:
+        primary.append(subproject_id)
+    if project_id:
+        primary.append(project_id)
+    fallback = [scope for scope in GLOBAL_FALLBACK_SCOPES if scope not in primary]
+    return primary, fallback
+
+
+def _scope_tier(scope: str | None, project_id: str, subproject_id: str | None) -> str:
+    scope = str(scope or "")
+    if subproject_id and scope == subproject_id:
+        return "subproject"
+    if project_id and scope == project_id:
+        return "project"
+    if scope in GLOBAL_FALLBACK_SCOPES:
+        return "fallback_global"
+    return "other"
+
+
+def _memory_category(memory_type: str | None) -> str:
+    memory_type = str(memory_type or "")
+    if memory_type in {"project_summary"}:
+        return "project_summary"
+    if memory_type in {"subsystem_summary", "feature_summary"}:
+        return "subproject_summary"
+    if memory_type in {"architecture_rule"}:
+        return "architecture_rule"
+    if memory_type in {"implementation_pattern"}:
+        return "implementation_pattern"
+    if memory_type in {"guardrail"}:
+        return "guardrail"
+    if memory_type in {"workflow_rule"}:
+        return "workflow_rule"
+    if memory_type in {"bug_history"}:
+        return "bug_history"
+    if memory_type in {"test_outcome"}:
+        return "test_outcome"
+    if memory_type in {"validation_pattern"}:
+        return "validation_pattern"
+    if memory_type in {"review_finding"}:
+        return "review_finding"
+    if memory_type in {"decision", "decision_record"}:
+        return "decision"
+    return "other"
+
+
+def _summarize_scope(rows: list[tuple], desired_types: tuple[str, ...], project_id: str, subproject_id: str | None) -> str | None:
+    for row in rows:
+        _id, memory_type, _lifecycle_state, text, _tags, _updated_at, _created_at, _work_id, scope = row
+        if memory_type in desired_types and _scope_tier(scope, project_id, subproject_id) != "fallback_global":
+            return text
+    return None
+
+
+def _fetch_rows(cur, scopes: list[str], eligible_types: list[str], limit: int) -> list[tuple]:
+    if not scopes:
+        return []
+
+    cur.execute(
+        """
+        SELECT id, memory_type, lifecycle_state, text, tags, updated_at, created_at, work_id, scope
+        FROM memory_items
+        WHERE scope = ANY(%s)
+          AND memory_type = ANY(%s)
+          AND lifecycle_state IN ('candidate', 'reinforced', 'durable')
+          AND (retrieval_eligibility IS NULL OR retrieval_eligibility <> 'excluded')
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT %s
+        """,
+        (scopes, eligible_types, limit),
+    )
+    return cur.fetchall()
+
 
 def fetch_orchestrator_context(
     *,
@@ -54,90 +236,65 @@ def fetch_orchestrator_context(
     tags: list[str] | None = None,
     limit: int = 6,
 ) -> dict:
-    """
-    Step 8 initial real implementation:
-    - canonical Postgres-first retrieval
-    - role-aware type filtering
-    - compact summaries + memory refs
-    - safe fallback if exact schema differs
-    Later you can enrich this behind the same function with Qdrant/Neo4j/reranker.
-    """
     tags = tags or []
-    preferred_types = ROLE_MEMORY_TYPES.get(role, ["project_summary", "architecture_rule", "guardrail"])
+    contract = _contract_for_role(role)
+    preferred_types = list(contract["preferred_types"])
+    eligible_types = list(contract["eligible_types"])
+    primary_scopes, fallback_scopes = _scope_plan(project_id, subproject_id)
     limit = max(1, min(limit, 12))
-
-    scopes = [project_id, "global"]
-    if subproject_id:
-        scopes.insert(1, subproject_id)
 
     with psycopg.connect(_get_dsn()) as conn:
         with conn.cursor() as cur:
-            work_row = None
+            primary_rows = _fetch_rows(cur, primary_scopes, eligible_types, max(limit * 4, limit))
+            fallback_rows = []
+            if len(primary_rows) < limit and fallback_scopes:
+                fallback_rows = _fetch_rows(cur, fallback_scopes, eligible_types, max(limit * 4, limit))
 
-            cur.execute(
-                """
-                SELECT text
-                FROM memory_items
-                WHERE scope = %s
-                  AND memory_type = 'project_summary'
-                  AND lifecycle_state IN ('reinforced', 'durable')
-                ORDER BY last_confirmed DESC NULLS LAST, first_seen DESC NULLS LAST
-                LIMIT 1
-                """,
-                (project_id,),
-            )
-            project_row = cur.fetchone()
+    deduped_rows = []
+    seen_ids: set[str] = set()
+    for row in [*primary_rows, *fallback_rows]:
+        memory_id = str(row[0])
+        if memory_id in seen_ids:
+            continue
+        seen_ids.add(memory_id)
+        deduped_rows.append(row)
 
-            subproject_row = None
-            if subproject_id:
-                cur.execute(
-                    """
-                    SELECT text
-                    FROM memory_items
-                    WHERE scope = %s
-                      AND memory_type IN ('subsystem_summary', 'feature_summary')
-                      AND lifecycle_state IN ('reinforced', 'durable')
-                    ORDER BY last_confirmed DESC NULLS LAST, first_seen DESC NULLS LAST
-                    LIMIT 1
-                    """,
-                    (subproject_id,),
-                )
-                subproject_row = cur.fetchone()
-
-            cur.execute(
-                """
-                SELECT id, memory_type, lifecycle_state, text
-                FROM memory_items
-                WHERE scope = ANY(%s)
-                  AND memory_type = ANY(%s)
-                  AND lifecycle_state IN ('reinforced', 'durable')
-                ORDER BY last_confirmed DESC NULLS LAST, first_seen DESC NULLS LAST
-                LIMIT %s
-                """,
-                (scopes, preferred_types, limit),
-            )
-            rows = cur.fetchall()
+    deduped_rows.sort(
+        key=lambda row: (
+            {"subproject": 0, "project": 1, "fallback_global": 2}.get(_scope_tier(row[8], project_id, subproject_id), 3),
+            preferred_types.index(row[1]) if row[1] in preferred_types else len(preferred_types),
+            str(row[0]),
+        )
+    )
+    selected_rows = deduped_rows[:limit]
 
     return {
         "ok": True,
-        "source": "postgres_canonical_initial",
+        "source": "postgres_canonical_scoped_contract",
+        "contract_version": CONTRACT_VERSION,
         "role": role,
         "mode": mode,
         "summaries": {
-            "work_summary": work_row[0] if work_row else None,
-            "project_summary": project_row[0] if project_row else None,
-            "subproject_summary": subproject_row[0] if subproject_row else None,
+            "work_summary": None,
+            "project_summary": _summarize_scope(selected_rows, ("project_summary",), project_id, subproject_id),
+            "subproject_summary": _summarize_scope(selected_rows, ("subsystem_summary", "feature_summary"), project_id, subproject_id),
             "feature_summary": None,
         },
         "memory_refs": [
             {
                 "memory_id": row[0],
                 "memory_type": row[1],
+                "category": _memory_category(row[1]),
                 "lifecycle_state": row[2],
                 "content": row[3],
+                "tags": row[4] or [],
                 "score": None,
+                "source_work_id": row[7],
+                "scope": row[8],
+                "scope_tier": _scope_tier(row[8], project_id, subproject_id),
+                "retrieval_contract_role": role,
             }
-            for row in rows
+            for row in selected_rows
         ],
         "meta": {
             "project_id": project_id,
@@ -145,5 +302,12 @@ def fetch_orchestrator_context(
             "kind": kind,
             "tags": tags,
             "limit": limit,
+            "primary_scopes": primary_scopes,
+            "fallback_scopes": fallback_scopes,
+            "fallback_used": bool(fallback_rows),
+            "eligible_categories": list(contract["eligible_categories"]),
+            "eligible_types": eligible_types,
+            "primary_candidate_count": len(primary_rows),
+            "fallback_candidate_count": len(fallback_rows),
         },
     }
