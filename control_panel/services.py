@@ -1,186 +1,44 @@
+"""Data services for the control panel — each function is independently fault-tolerant."""
 from __future__ import annotations
 
 import json
 import os
-import psycopg
-from collections import defaultdict
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from orchestrator.operator_status_summary import build_operator_summary, recent_milestone_operator_summaries
+import psycopg
+import requests
 
-from config import CONFIG_PATH, CONTROL_PANEL_DIR, DEFAULT_CONFIG, PROJECTS_DIR, SCRIPTS_DIR
-from data_architecture import ARCHITECTURE_CROSS_EDGES, ARCHITECTURE_TREES
+from config import (
+    DB_DSN,
+    MEMORY_INDEX,
+    NEO4J_PASS,
+    NEO4J_URI,
+    NEO4J_USER,
+    PY,
+    QDRANT_URL,
+    SCRIPTS_DIR,
+    WORKSPACE,
+    load_openclaw_config,
+)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def safe_html(text: Any) -> str:
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def ensure_config() -> None:
-    CONTROL_PANEL_DIR.mkdir(parents=True, exist_ok=True)
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
-
-
-def load_config() -> dict[str, Any]:
-    ensure_config()
+def _safe(fn, default=None):
+    """Call fn(), return default on any exception."""
     try:
-        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return fn()
     except Exception:
-        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
-
-    cfg.setdefault("agents", [])
-    cfg.setdefault("tracked_paths", [])
-    cfg.setdefault("pipeline", DEFAULT_CONFIG["pipeline"].copy())
-    cfg.setdefault("heartbeat", DEFAULT_CONFIG["heartbeat"].copy())
-    cfg.setdefault("commands", DEFAULT_CONFIG["commands"].copy())
-
-    for agent in cfg["agents"]:
-        agent.setdefault("enabled", True)
-        agent.setdefault("in_pipeline", True)
-        agent.setdefault("role", "custom")
-        agent.setdefault("heartbeat_enabled", True)
-        agent.setdefault("heartbeat_mode", "standard")
-        agent.setdefault("shortcut", agent.get("name", ""))
-
-    return cfg
+        return default
 
 
-def save_config(config: dict[str, Any]) -> None:
-    CONTROL_PANEL_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-
-def project_summaries() -> list[dict[str, Any]]:
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    out: list[dict[str, Any]] = []
-    for p in sorted(PROJECTS_DIR.iterdir()):
-        if not p.is_dir():
-            continue
-        current_file = p / "current.md"
-        daily_dir = p / "daily"
-        milestone_files = sorted(p.glob("milestone-*.md"))
-        daily_count = len(list(daily_dir.glob("*.md"))) if daily_dir.exists() else 0
-        out.append(
-            {
-                "name": p.name,
-                "path": str(p),
-                "has_current": current_file.exists(),
-                "milestones": len(milestone_files),
-                "daily_count": daily_count,
-            }
-        )
-    return out
-
-
-def get_all_script_files() -> list[str]:
-    if not SCRIPTS_DIR.exists():
-        return []
-    return sorted(p.name for p in SCRIPTS_DIR.glob("*.py"))
-
-
-def classify_script(script_name: str) -> str:
-    s = script_name.lower()
-    if any(x in s for x in ["dehydrate", "chunk", "extract_chunk", "filter_memory", "judge_memory", "extract_memory_fields"]):
-        return "Ingest + Dehydrate"
-    if any(x in s for x in ["route_memory", "approve_pending", "reject_pending", "promote_memory", "demote_memory", "restore_memory", "auto_promote", "process_auto"]):
-        return "Routing + Review"
-    if any(x in s for x in ["search_memory", "embed_memory", "mark_retrieval", "feedback", "top_retrieved", "low_utility"]):
-        return "Retrieval + Tensor"
-    if any(x in s for x in ["sync_registry", "write_memory", "select_best", "match_memory", "reconcile", "patch_memory", "memory_db"]):
-        return "Canonical Registry"
-    if any(x in s for x in ["conflict", "maintenance", "show_", "why_was", "report_"]):
-        return "Inspection + Diagnostics"
-    if "migrate_" in s:
-        return "Migration Utilities"
-    return "Other / Unmapped"
-
-
-def script_inventory_groups() -> dict[str, list[str]]:
-    groups: dict[str, list[str]] = defaultdict(list)
-    for script_name in get_all_script_files():
-        groups[classify_script(script_name)].append(script_name)
-    return dict(groups)
-
-
-def all_stage_nodes() -> list[dict[str, Any]]:
-    nodes: list[dict[str, Any]] = []
-    for tree in ARCHITECTURE_TREES:
-        for node in tree["nodes"]:
-            merged = dict(node)
-            merged["tree_id"] = tree["id"]
-            merged["tree_title"] = tree["title"]
-            merged["tree_color"] = tree["color"]
-            nodes.append(merged)
-    return nodes
-
-
-def mermaid_id(node_id: str) -> str:
-    return "node_" + node_id.replace("-", "_")
-
-
-def build_mermaid_diagram() -> str:
-    lines = [
-        "flowchart TB",
-        "classDef source fill:#15243d,stroke:#6ea8fe,color:#edf2ff,stroke-width:2px;",
-        "classDef policy fill:#1f2940,stroke:#8cb4ff,color:#edf2ff,stroke-width:2px;",
-        "classDef pipeline fill:#1c2a35,stroke:#4dd4ac,color:#edf2ff,stroke-width:2px;",
-        "classDef queue fill:#2f2a1c,stroke:#ffd166,color:#edf2ff,stroke-width:2px;",
-        "classDef database fill:#271d35,stroke:#c084fc,color:#edf2ff,stroke-width:2px;",
-        "classDef tensor fill:#183535,stroke:#2dd4bf,color:#edf2ff,stroke-width:2px;",
-        "classDef project fill:#2b2233,stroke:#fb7185,color:#edf2ff,stroke-width:2px;",
-        "classDef inventory fill:#2b2233,stroke:#fb7185,color:#edf2ff,stroke-width:2px;",
-        "classDef component fill:#162642,stroke:#6ea8fe,color:#edf2ff,stroke-width:2px;",
-    ]
-
-    click_lines = []
-
-    for tree in ARCHITECTURE_TREES:
-        lines.append(f"subgraph {tree['id']}[{tree['title']}]")
-        lines.append("direction LR")
-        for node in tree["nodes"]:
-            node_mid = mermaid_id(node["id"])
-            label = f"{node['title']}<br/><span style='font-size:11px'>{node['subtitle']}</span>"
-            lines.append(f'    {node_mid}["{label}"]')
-            click_lines.append(f"click {node_mid} call openArchNode('{node['id']}')")
-        for src, dst, edge_label in tree["edges"]:
-            lines.append(f"    {mermaid_id(src)} -- {edge_label} --> {mermaid_id(dst)}")
-        lines.append("end")
-
-    for src, dst, edge_label in ARCHITECTURE_CROSS_EDGES:
-        lines.append(f"{mermaid_id(src)} -. {edge_label} .-> {mermaid_id(dst)}")
-
-    for node in all_stage_nodes():
-        lines.append(f"class {mermaid_id(node['id'])} {node['kind']};")
-
-    lines.extend(click_lines)
-    return "\n".join(lines)
-
-def find_node(node_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    for tree in ARCHITECTURE_TREES:
-        for node in tree["nodes"]:
-            if node["id"] == node_id:
-                merged = dict(node)
-                merged["tree_title"] = tree["title"]
-                merged["tree_color"] = tree["color"]
-                return tree, merged
-    raise KeyError(node_id)
-
-
-def get_db_dsn() -> str:
-    return os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=postgres")
-
-
-def db_scalar(sql: str, params: tuple = ()) -> int:
+def _db_scalar(sql: str, params: tuple = ()) -> int:
     try:
-        with psycopg.connect(get_db_dsn()) as conn:
+        with psycopg.connect(DB_DSN) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 row = cur.fetchone()
@@ -189,65 +47,387 @@ def db_scalar(sql: str, params: tuple = ()) -> int:
         return 0
 
 
-def memory_status_counts() -> dict[str, int]:
-    return {
-        "active_memories": db_scalar("SELECT COUNT(*) FROM memory_items WHERE status = %s", ("active",)),
-        "superseded_memories": db_scalar("SELECT COUNT(*) FROM memory_items WHERE status = %s", ("superseded",)),
-        "inbox_queue": db_scalar("SELECT COUNT(*) FROM memory_inbox"),
-        "pending_stable_queue": db_scalar("SELECT COUNT(*) FROM memory_pending_stable"),
-        "discarded_queue": db_scalar("SELECT COUNT(*) FROM memory_discarded"),
-        "embedding_rows": db_scalar("SELECT COUNT(*) FROM memory_item_embeddings"),
-        "retrieval_feedback_rows": db_scalar("SELECT COUNT(*) FROM retrieval_feedback"),
-    }
-
-
-def project_db_rows(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+def _db_rows(sql: str, params: tuple = (), limit: int = 50) -> list[dict]:
     try:
-        with psycopg.connect(get_db_dsn()) as conn:
+        with psycopg.connect(DB_DSN) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
+                return [dict(zip(cols, row)) for row in cur.fetchmany(limit)]
     except Exception:
         return []
 
 
-def orchestrator_operator_overview(limit: int = 6) -> dict[str, Any]:
-    rows = project_db_rows(
-        """
-        SELECT
-            work_id,
-            title,
-            status,
-            next_action,
-            COALESCE(metadata_json, '{}'::jsonb) AS metadata_json
-        FROM work_items
-        ORDER BY updated_at DESC NULLS LAST, created_at DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    work_items = []
-    for row in rows:
-        metadata = dict(row.get("metadata_json") or {})
-        work_items.append(
-            {
-                "work_id": row.get("work_id"),
-                "title": row.get("title"),
-                "status": row.get("status"),
-                "next_action": row.get("next_action"),
-                "summary": build_operator_summary(
-                    work_context={
-                        "metadata_json": metadata,
-                        "execution_rollup": metadata.get("execution_rollup") or {},
-                        "execution_governance": metadata.get("execution_governance") or {},
-                        "next_action": row.get("next_action"),
-                    }
-                ),
-            }
-        )
+# ---------------------------------------------------------------------------
+# System overview
+# ---------------------------------------------------------------------------
+
+def system_health() -> dict[str, Any]:
+    """Overall system health — containers, DB, services."""
+    containers = docker_status()
+    running = sum(1 for c in containers if "Up" in c.get("status", ""))
+    total = len(containers)
+
+    memory_count = _db_scalar("SELECT COUNT(*) FROM memory_items")
+    test_result = last_test_result()
+
+    health = "healthy"
+    issues = []
+
+    if running < total:
+        health = "degraded"
+        issues.append(f"{total - running}/{total} containers down")
+    if memory_count == 0:
+        health = "degraded"
+        issues.append("No memory items in DB")
+    if test_result.get("failed", 0) > 0:
+        health = "warning"
+        issues.append(f"{test_result['failed']} tests failing")
 
     return {
-        "work_items": work_items,
-        "milestones": recent_milestone_operator_summaries(limit=4),
+        "health": health,
+        "issues": issues,
+        "containers_up": running,
+        "containers_total": total,
+        "memory_items": memory_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Docker / Containers
+# ---------------------------------------------------------------------------
+
+def docker_status() -> list[dict[str, str]]:
+    """Get status of all docker containers."""
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Ports}}|{{.Image}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        results = []
+        for line in proc.stdout.strip().splitlines():
+            parts = line.split("|", 3)
+            if len(parts) >= 2:
+                results.append({
+                    "name": parts[0],
+                    "status": parts[1],
+                    "ports": parts[2] if len(parts) > 2 else "",
+                    "image": parts[3] if len(parts) > 3 else "",
+                })
+        return results
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Agents (from real OpenClaw config)
+# ---------------------------------------------------------------------------
+
+def agent_list() -> list[dict[str, Any]]:
+    """Read agents from openclaw.json."""
+    cfg = load_openclaw_config()
+    agents_cfg = cfg.get("agents", {})
+    defaults = agents_cfg.get("defaults", {})
+    default_model = defaults.get("model", {})
+    if isinstance(default_model, str):
+        default_model_name = default_model
+    else:
+        default_model_name = default_model.get("primary", "unknown")
+
+    agents = []
+    for agent in agents_cfg.get("list", []):
+        model = agent.get("model", default_model_name)
+        if isinstance(model, dict):
+            model = model.get("primary", "unknown")
+        agents.append({
+            "id": agent.get("id", ""),
+            "name": agent.get("name", agent.get("id", "")),
+            "model": model,
+            "workspace": agent.get("workspace", defaults.get("workspace", "")),
+            "has_subagents": bool(agent.get("subagents", {}).get("allowAgents")),
+            "tools": agent.get("tools", {}),
+        })
+    return agents
+
+
+# ---------------------------------------------------------------------------
+# Memory stats
+# ---------------------------------------------------------------------------
+
+def memory_stats() -> dict[str, int]:
+    return {
+        "total": _db_scalar("SELECT COUNT(*) FROM memory_items"),
+        "active": _db_scalar("SELECT COUNT(*) FROM memory_items WHERE status = 'active'"),
+        "superseded": _db_scalar("SELECT COUNT(*) FROM memory_items WHERE status = 'superseded'"),
+        "inbox": _db_scalar("SELECT COUNT(*) FROM memory_inbox"),
+        "pending_stable": _db_scalar("SELECT COUNT(*) FROM memory_pending_stable"),
+        "discarded": _db_scalar("SELECT COUNT(*) FROM memory_discarded"),
+        "embeddings": _db_scalar("SELECT COUNT(*) FROM memory_item_embeddings"),
+        "feedback": _db_scalar("SELECT COUNT(*) FROM retrieval_feedback"),
+        "code_chunks": _db_scalar("SELECT COUNT(*) FROM code_chunks"),
+    }
+
+
+def recent_memory_items(limit: int = 10) -> list[dict]:
+    return _db_rows(
+        """SELECT id, text, status, memory_type, entity, property, value,
+                  created_at, updated_at
+           FROM memory_items ORDER BY created_at DESC LIMIT %s""",
+        (limit,),
+    )
+
+
+def memory_search(query: str, top_k: int = 10) -> list[dict]:
+    """Run hybrid search via the CLI script."""
+    try:
+        proc = subprocess.run(
+            [PY, str(SCRIPTS_DIR / "hybrid_search_cli.py"), "--query", query, "--top-k", str(top_k)],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(SCRIPTS_DIR),
+            env={**os.environ, "OPENCLAW_MEMORY_DB_DSN": DB_DSN},
+        )
+        results = []
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if line and line != "NONE":
+                try:
+                    results.append(json.loads(line))
+                except Exception:
+                    pass
+        return results
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+# ---------------------------------------------------------------------------
+# Code graph (Neo4j + Qdrant)
+# ---------------------------------------------------------------------------
+
+def neo4j_stats() -> dict[str, Any]:
+    """Get node/relationship counts from Neo4j."""
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "openclaw-neo4j", "cypher-shell",
+             "-u", NEO4J_USER, "-p", NEO4J_PASS,
+             "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS cnt ORDER BY cnt DESC"],
+            capture_output=True, text=True, timeout=10,
+        )
+        nodes = {}
+        for line in result.stdout.strip().splitlines()[1:]:  # skip header
+            parts = line.strip().split(",")
+            if len(parts) == 2:
+                label = parts[0].strip().strip('"')
+                count = int(parts[1].strip().strip('"'))
+                if label:
+                    nodes[label] = count
+
+        result2 = subprocess.run(
+            ["docker", "exec", "openclaw-neo4j", "cypher-shell",
+             "-u", NEO4J_USER, "-p", NEO4J_PASS,
+             "MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS cnt ORDER BY cnt DESC"],
+            capture_output=True, text=True, timeout=10,
+        )
+        rels = {}
+        for line in result2.stdout.strip().splitlines()[1:]:
+            parts = line.strip().split(",")
+            if len(parts) == 2:
+                rel = parts[0].strip().strip('"')
+                count = int(parts[1].strip().strip('"'))
+                if rel:
+                    rels[rel] = count
+
+        return {
+            "status": "online",
+            "nodes": nodes,
+            "relationships": rels,
+            "total_nodes": sum(nodes.values()),
+            "total_relationships": sum(rels.values()),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "nodes": {}, "relationships": {}, "total_nodes": 0, "total_relationships": 0}
+
+
+def qdrant_stats() -> dict[str, Any]:
+    """Get collection info from Qdrant."""
+    try:
+        resp = requests.get(f"{QDRANT_URL}/collections", timeout=5)
+        data = resp.json()
+        collections = {}
+        for col in data.get("result", {}).get("collections", []):
+            name = col["name"]
+            detail = requests.get(f"{QDRANT_URL}/collections/{name}", timeout=5).json()
+            info = detail.get("result", {})
+            collections[name] = {
+                "points": info.get("points_count", 0),
+                "vectors": info.get("vectors_count", 0),
+                "status": info.get("status", "unknown"),
+            }
+        return {"status": "online", "collections": collections}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "collections": {}}
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+_last_test_cache: dict[str, Any] = {}
+
+
+def run_tests() -> dict[str, Any]:
+    """Run the full pytest suite and return results."""
+    global _last_test_cache
+    try:
+        proc = subprocess.run(
+            ["python3", "-m", "pytest", "scripts/", "-q", "--tb=line",
+             "--ignore=scripts/hybrid_search_cli.py"],
+            capture_output=True, text=True, timeout=120,
+            cwd=str(MEMORY_INDEX),
+        )
+        output = proc.stdout + proc.stderr
+        # Parse summary line
+        passed = failed = 0
+        for line in output.splitlines():
+            if "passed" in line:
+                import re
+                m = re.search(r"(\d+)\s+passed", line)
+                if m:
+                    passed = int(m.group(1))
+                m2 = re.search(r"(\d+)\s+failed", line)
+                if m2:
+                    failed = int(m2.group(1))
+
+        result = {
+            "passed": passed,
+            "failed": failed,
+            "exit_code": proc.returncode,
+            "output": output[-3000:],  # last 3K chars
+            "run_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _last_test_cache.update(result)
+        return result
+    except Exception as e:
+        return {"passed": 0, "failed": 0, "exit_code": -1, "output": str(e), "run_at": ""}
+
+
+def last_test_result() -> dict[str, Any]:
+    return _last_test_cache if _last_test_cache else {"passed": 0, "failed": 0, "exit_code": -1, "output": "", "run_at": "never"}
+
+
+# ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
+
+def run_benchmark() -> dict[str, Any]:
+    """Run the retrieval benchmark."""
+    try:
+        proc = subprocess.run(
+            [PY, str(SCRIPTS_DIR / "retrieval_benchmark.py")],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(SCRIPTS_DIR),
+            env={**os.environ, "OPENCLAW_MEMORY_DB_DSN": DB_DSN},
+        )
+        # Parse JSON output
+        for line in reversed((proc.stdout or "").splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except Exception:
+                    pass
+        return {"output": proc.stdout[-2000:], "stderr": proc.stderr[-1000:]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Git status
+# ---------------------------------------------------------------------------
+
+def git_info() -> dict[str, Any]:
+    """Get git repo status."""
+    try:
+        cwd = str(MEMORY_INDEX)
+
+        log = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
+        )
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
+        )
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
+        )
+
+        dirty_files = [l for l in status.stdout.strip().splitlines() if l.strip()]
+
+        return {
+            "branch": branch.stdout.strip(),
+            "remote": remote.stdout.strip(),
+            "recent_commits": log.stdout.strip().splitlines(),
+            "dirty_files": len(dirty_files),
+            "dirty_list": dirty_files[:10],
+            "clean": len(dirty_files) == 0,
+        }
+    except Exception as e:
+        return {"branch": "?", "remote": "?", "recent_commits": [], "dirty_files": 0, "clean": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Background services
+# ---------------------------------------------------------------------------
+
+def service_status() -> dict[str, Any]:
+    """Check background service PIDs and status."""
+    services = {}
+
+    # Tracked path watcher
+    pid_file = MEMORY_INDEX / "runtime" / "tracked_path_watcher.pid"
+    services["watcher"] = _check_pid_service(pid_file, "Tracked Path Watcher")
+
+    # Heartbeat worker
+    pid_file_hb = MEMORY_INDEX / "runtime" / "heartbeat_worker.pid"
+    services["heartbeat"] = _check_pid_service(pid_file_hb, "Heartbeat Worker")
+
+    return services
+
+
+def _check_pid_service(pid_file: Path, name: str) -> dict:
+    if not pid_file.exists():
+        return {"name": name, "running": False, "pid": None}
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)  # Check if process exists
+        return {"name": name, "running": True, "pid": pid}
+    except (ProcessLookupError, ValueError):
+        return {"name": name, "running": False, "pid": None}
+    except PermissionError:
+        return {"name": name, "running": True, "pid": pid}  # exists but owned by another user
+
+
+# ---------------------------------------------------------------------------
+# Script runner
+# ---------------------------------------------------------------------------
+
+def run_script(script_name: str) -> str:
+    """Run a script and return output."""
+    script = SCRIPTS_DIR / script_name
+    if not script.exists():
+        return f"Script not found: {script_name}"
+    try:
+        env = {**os.environ, "OPENCLAW_MEMORY_DB_DSN": DB_DSN}
+        proc = subprocess.run(
+            [PY, str(script)],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(SCRIPTS_DIR), env=env,
+        )
+        return (proc.stdout + proc.stderr).strip() or f"exit code {proc.returncode}"
+    except Exception as e:
+        return str(e)

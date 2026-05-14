@@ -1,724 +1,560 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>{{ title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — OpenClaw Memory System</title>
   <link rel="stylesheet" href="/static/control_panel.css">
-  <script type="module" src="/static/architecture.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
-  <div class="wrap">
-    <div class="nav">
-      <a class="nav-link {% if page=='overview' %}active{% endif %}" href="/">Overview</a>
-      <a class="nav-link {% if page=='agents' %}active{% endif %}" href="/agents">Agents</a>
-      <a class="nav-link {% if page=='heartbeat' %}active{% endif %}" href="/heartbeat">Heartbeat</a>
-      <a class="nav-link {% if page=='projects' or page=='project_detail' %}active{% endif %}" href="/projects">Projects</a>
-      <a class="nav-link {% if page=='architecture' or page=='architecture_node' %}active{% endif %}" href="/architecture">Memory Graph</a>
-      <a class="nav-link {% if page=='commands' %}active{% endif %}" href="/commands">Commands</a>
-      <a class="nav-link {{ "active" if page == "search" else "" }}" href="/search">Search</a>
-      <a class="nav-link {{ "active" if page == "checkpoints" else "" }}" href="/checkpoints">Checkpoints</a>
-    </div>
 
-    <div class="hero">
+<div class="shell">
+
+  <!-- ═══ Sidebar ═══ -->
+  <aside class="sidebar">
+    <div class="logo">
+      🧠 OpenClaw
+      <span>Memory System</span>
+    </div>
+    <nav>
+      <a href="/" class="{{ 'active' if page == 'dashboard' }}">
+        <span class="icon">📊</span> <span>Dashboard</span>
+      </a>
+      <a href="/agents" class="{{ 'active' if page == 'agents' }}">
+        <span class="icon">🤖</span> <span>Agents</span>
+      </a>
+      <a href="/memory" class="{{ 'active' if page == 'memory' }}">
+        <span class="icon">💾</span> <span>Memory</span>
+      </a>
+      <a href="/code-graph" class="{{ 'active' if page == 'code-graph' }}">
+        <span class="icon">🔗</span> <span>Code Graph</span>
+      </a>
+      <a href="/tests" class="{{ 'active' if page == 'tests' }}">
+        <span class="icon">🧪</span> <span>Tests</span>
+      </a>
+      <a href="/benchmarks" class="{{ 'active' if page == 'benchmarks' }}">
+        <span class="icon">📈</span> <span>Benchmarks</span>
+      </a>
+      <a href="/services" class="{{ 'active' if page == 'services' }}">
+        <span class="icon">⚙️</span> <span>Services</span>
+      </a>
+      <a href="/git" class="{{ 'active' if page == 'git' }}">
+        <span class="icon">🔀</span> <span>Repository</span>
+      </a>
+    </nav>
+  </aside>
+
+  <!-- ═══ Main content ═══ -->
+  <main class="main">
+    <div class="page-header">
       <h1>{{ title }}</h1>
-      <p>Manage the memory pipeline, agents, heartbeat rules, tracked files, project state, and full system graph from one place.</p>
     </div>
 
-    {% if page == "overview" %}
-    <div class="stats">
-      <div class="stat"><div class="muted small">Agents</div><div class="num">{{ config.agents|length }}</div></div>
-      <div class="stat"><div class="muted small">Projects</div><div class="num">{{ projects|length }}</div></div>
-      <div class="stat"><div class="muted small">Active memories</div><div class="num">{{ db_counts.active_memories }}</div></div>
-      <div class="stat"><div class="muted small">Inbox queue</div><div class="num">{{ db_counts.inbox_queue }}</div></div>
-      <div class="stat"><div class="muted small">Pending stable</div><div class="num">{{ db_counts.pending_stable_queue }}</div></div>
-      <div class="stat"><div class="muted small">Discarded</div><div class="num">{{ db_counts.discarded_queue }}</div></div>
-      <div class="stat"><div class="muted small">Embeddings</div><div class="num">{{ db_counts.embedding_rows }}</div></div>
-      <div class="stat"><div class="muted small">Feedback rows</div><div class="num">{{ db_counts.retrieval_feedback_rows }}</div></div>
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- DASHBOARD                                                         -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "dashboard" %}
+
+    <div class="health-banner {{ health.health }}">
+      <div class="health-dot"></div>
+      System {{ health.health }}
+      {% if health.issues %}
+        — {{ health.issues | join(', ') }}
+      {% endif %}
     </div>
 
-    <div class="grid" style="margin-top:16px;">
-      <div class="card span-8">
-        <h2>Quick status</h2>
-        <p>
-          <span class="pill">Heartbeat {{ "on" if config.heartbeat.heartbeat_enabled else "off" }}</span>
-          <span class="pill gray">mode: {{ config.heartbeat.heartbeat_mode }}</span>
-          <span class="pill gray">interval: {{ config.heartbeat.heartbeat_interval_seconds }}s</span>
-          <span class="pill gray">port: {{ default_port }}</span>
-        </p>
-        <p class="muted">
-          Active: {{ db_counts.active_memories }} ·
-          Inbox: {{ db_counts.inbox_queue }} ·
-          Pending stable: {{ db_counts.pending_stable_queue }} ·
-          Discarded: {{ db_counts.discarded_queue }} ·
-          Embeddings: {{ db_counts.embedding_rows }} ·
-          Feedback: {{ db_counts.retrieval_feedback_rows }}
-        </p>
-      </div>
-
-      <div class="card span-4">
-        <h2>Shortcuts</h2>
-        <div class="actions">
-          <a class="nav-link" href="/agents">Manage agents</a>
-          <a class="nav-link" href="/heartbeat">Heartbeat settings</a>
-          <a class="nav-link" href="/projects">Project tracker</a>
-          <a class="nav-link" href="/architecture">Memory graph</a>
-          <a class="nav-link" href="/commands">Run commands</a>
-        </div>
-
-        <h3 style="margin-top:16px;">Quick actions</h3>
-        <div class="actions">
-          <form method="post" action="/run">
-            <input type="hidden" name="command_name" value="show_queue">
-            <button type="submit">Show queue</button>
-          </form>
-          <form method="post" action="/run">
-            <input type="hidden" name="command_name" value="embed_active">
-            <button type="submit">Embed active</button>
-          </form>
-          <form method="post" action="/run">
-            <input type="hidden" name="command_name" value="sync_markdown">
-            <button type="submit">Sync markdown</button>
-          </form>
-          <form method="post" action="/run">
-            <input type="hidden" name="command_name" value="maintenance_cycle">
-            <button type="submit">Run maintenance</button>
-          </form>
-        </div>
-      </div>
-    </div>
-
-    <div class="grid" style="margin-top:16px;">
-      <div class="card span-6">
-        <h2>Orchestrator work-item truth surface</h2>
-        <ul class="clean">
-          {% for item in operator_overview.work_items %}
-          <li>
-            <strong>{{ item.title }}</strong><br>
-            <span class="pill gray">{{ item.status }}</span>
-            <span class="pill gray">next: {{ item.next_action }}</span>
-            <span class="pill {% if item.summary.readiness == 'healthy' %}success{% elif item.summary.readiness.startswith('blocked') or item.summary.readiness == 'repair_bundle_active' %}error{% else %}gray{% endif %}">{{ item.summary.readiness }}</span><br>
-            <span class="muted">proof: {{ item.summary.proof_status }} · execution: {{ item.summary.execution_status }} · blocker: {{ item.summary.primary_blocker or '-' }}</span><br>
-            <span class="muted">repair: {{ item.summary.active_repair_mode or '-' }} · retarget: {{ item.summary.active_retarget_mode or '-' }}</span>
-            {% if item.summary.repair_bundle_summary %}<br><span class="muted">bundle: {{ item.summary.repair_bundle_summary }}</span>{% endif %}
-          </li>
-          {% else %}
-          <li>No recent work items.</li>
-          {% endfor %}
-        </ul>
-      </div>
-
-      <div class="card span-6">
-        <h2>Milestone truth surface</h2>
-        <ul class="clean">
-          {% for item in operator_overview.milestones %}
-          <li>
-            <strong>{{ item.title or item.milestone_id }}</strong><br>
-            <span class="pill gray">{{ item.summary.readiness }}</span>
-            <span class="muted">healthy: {{ item.summary.healthy_execution_backed_count }}/{{ item.summary.feature_count }}</span><br>
-            <span class="muted">validation: {{ item.summary.blocked_validation_count }} · code: {{ item.summary.blocked_code_repair_count }} · plan: {{ item.summary.blocked_plan_recovery_count }}</span><br>
-            <span class="muted">blocker: {{ item.summary.primary_blocker or '-' }} · bundles: {{ item.summary.bundle_modes_active|join(', ') if item.summary.bundle_modes_active else '-' }}</span>
-          </li>
-          {% else %}
-          <li>No recent milestone artifacts.</li>
-          {% endfor %}
-        </ul>
-      </div>
-    </div>
-
-    <div class="grid" style="margin-top:16px;">
-      <div class="card span-4">
-        <h2>Memory flow monitor</h2>
-        <p class="muted">Live queue counts and recent memory movement.</p>
-        <p>
-          <span class="pill gray">Inbox: {{ live_status.queues.inbox }}</span>
-          <span class="pill gray">Pending stable: {{ live_status.queues.pending_stable }}</span>
-          <span class="pill gray">Canonical: {{ live_status.queues.canonical_active }}</span>
-          <span class="pill gray">Discarded: {{ live_status.queues.discarded }}</span>
-        </p>
-
-        <h3>Recent inbox</h3>
-        <ul class="clean">
-          {% for item in live_status.recent_memory.inbox %}
-          <li><code>{{ item.id }}</code><br>{{ item.text[:120] }}{% if item.text|length > 120 %}...{% endif %}</li>
-          {% else %}
-          <li>No recent inbox items.</li>
-          {% endfor %}
-        </ul>
-
-
-        <h3 style="margin-top:12px;">Recent canonical</h3>
-        <ul class="clean">
-          {% for item in live_status.recent_memory.canonical %}
-          <li><code>{{ item.id }}</code><br>{{ item.text[:120] }}{% if item.text|length > 120 %}...{% endif %}</li>
-          {% else %}
-          <li>No recent canonical items.</li>
-          {% endfor %}
-        </ul>
-      </div>
-
-      <div class="card span-4">
-        <h2>Conflict resolution</h2>
-        <p class="muted">Potential conflicts detected from multiple active canonical variants sharing the same entity + property.</p>
-
-        <ul class="clean">
-          {% for row in live_status.conflicts %}
-          <li>
-            <strong>{{ row.entity }}</strong> / <strong>{{ row.property }}</strong><br>
-            <span class="pill gray">variants: {{ row.variants }}</span>
-
-            <ul class="clean" style="margin-top:8px;">
-              {% for item in row["items"] %}
-              <li>
-                <code>{{ item.id }}</code><br>
-                {{ item.text[:100] }}{% if item.text|length > 100 %}...{% endif %}<br>
-                <span class="pill gray">confidence: {{ item.confidence }}</span>
-                <span class="pill gray">importance: {{ item.importance }}</span>
-
-                <div class="actions" style="margin-top:8px;">
-                  <form method="post" action="/conflicts/demote">
-                    <input type="hidden" name="item_id" value="{{ item.id }}">
-                    <button type="submit">Demote</button>
-                  </form>
-                  <form method="post" action="/conflicts/restore">
-                    <input type="hidden" name="item_id" value="{{ item.id }}">
-                    <button type="submit">Restore</button>
-                  </form>
-                </div>
-              </li>
-              {% endfor %}
-            </ul>
-          </li>
-          {% else %}
-          <li>No active conflicts detected.</li>
-          {% endfor %}
-        </ul>
-
-
-        <p class="muted" style="margin-top:12px;">
-          This is phase 1: visibility. The next upgrade is one-click judge/promote/demote actions from the panel.
-        </p>
-      </div>
-
-      <div class="card span-4">
-        <h2>Heartbeat monitor</h2>
-        <p>
-          {% if live_status.heartbeat.healthy %}
-          <span class="pill success">healthy pulse</span>
-          {% elif live_status.heartbeat.warning %}
-          <span class="pill gray">stale warning</span>
-          {% else %}
-          <span class="pill error">critical / no pulse</span>
-          {% endif %}
-        </p>
-
-        <p class="muted">
-          Stale seconds: {{ live_status.heartbeat.stale_seconds if live_status.heartbeat.stale_seconds is not none else "unknown" }}
-        </p>
-
-        <ul class="clean">
-          <li>
-            <strong>HEARTBEAT.md</strong><br>
-            <span class="muted">{{ live_status.heartbeat.heartbeat_file_mtime or "missing" }}</span>
-          </li>
-          <li>
-            <strong>HEARTBEAT_AGENTS.md</strong><br>
-            <span class="muted">{{ live_status.heartbeat.heartbeat_agent_file_mtime or "missing" }}</span>
-          </li>
-          <li>
-            <strong>decisions.log</strong><br>
-            <span class="muted">{{ live_status.heartbeat.decisions_log_mtime or "missing" }}</span>
-          </li>
-        </ul>
-
-
-        <p class="muted" style="margin-top:12px;">
-          This is phase 1 health visibility. Next step is staleness thresholds and warning colors.
-        </p>
-      </div>
-    </div>
-
-    {% endif %}
-
-    {% if page == "search" %}
+    <!-- Stats row -->
     <div class="grid">
-      <div class="card span-12">
-        <h2>Hybrid Memory Search</h2>
-        <form method="post" action="/search">
-          <div class="form-row">
-            <div class="col-12">
-              <label>Query</label>
-              <input type="text" name="query" value="{{ search_query or '' }}" placeholder="checkpoint pipeline stable promotion policy" required>
-            </div>
+      <div class="stat-card span-2 accent">
+        <div class="value">{{ stats.total }}</div>
+        <div class="label">Memory Items</div>
+      </div>
+      <div class="stat-card span-2 green">
+        <div class="value">{{ stats.active }}</div>
+        <div class="label">Active</div>
+      </div>
+      <div class="stat-card span-2 purple">
+        <div class="value">{{ stats.embeddings }}</div>
+        <div class="label">Embeddings</div>
+      </div>
+      <div class="stat-card span-2 cyan">
+        <div class="value">{{ stats.code_chunks }}</div>
+        <div class="label">Code Chunks</div>
+      </div>
+      <div class="stat-card span-2 yellow">
+        <div class="value">{{ stats.feedback }}</div>
+        <div class="label">Feedback Rows</div>
+      </div>
+      <div class="stat-card span-2">
+        <div class="value">{{ health.containers_up }}/{{ health.containers_total }}</div>
+        <div class="label">Containers Up</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <!-- Containers -->
+      <div class="card span-4">
+        <h2>Containers</h2>
+        {% for c in containers %}
+        <div class="container-row">
+          <div class="container-dot {{ 'up' if 'Up' in c.status else 'down' }}"></div>
+          <div class="container-name">{{ c.name }}</div>
+          <div class="container-status">{{ c.status }}</div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <!-- Services -->
+      <div class="card span-4">
+        <h2>Background Services</h2>
+        {% for key, svc in services.items() %}
+        <div class="container-row">
+          <div class="container-dot {{ 'up' if svc.running else 'down' }}"></div>
+          <div class="container-name">{{ svc.name }}</div>
+          <div class="container-status">
+            {% if svc.running %}PID {{ svc.pid }}{% else %}stopped{% endif %}
           </div>
-          <button class="primary" type="submit">Run search</button>
-        </form>
+        </div>
+        {% endfor %}
+
+        <h2 style="margin-top: 20px;">Tests</h2>
+        <div class="container-row">
+          {% if tests.passed > 0 %}
+          <div class="container-dot up"></div>
+          <div class="container-name">{{ tests.passed }} passed</div>
+          {% else %}
+          <div class="container-dot down"></div>
+          <div class="container-name">Not run yet</div>
+          {% endif %}
+          <div class="container-status">{{ tests.run_at if tests.run_at != 'never' else '' }}</div>
+        </div>
       </div>
 
-      <div class="card span-12">
-        <h2>Results</h2>
-        <ul class="clean">
-          {% for row in search_results %}
-          <li>
-            <span class="pill gray">{{ row.source_type }}</span>
-            <span class="pill gray">{{ "%.3f"|format(row.score) }}</span><br>
-            <code>{{ row.path }}</code><br>
-            {{ row.text }}
-          </li>
-          {% else %}
-          <li>No results yet.</li>
-          {% endfor %}
-        </ul>
+      <!-- Git -->
+      <div class="card span-4">
+        <h2>Repository</h2>
+        <p style="margin-bottom: 8px;">
+          <span class="pill {{ 'green' if git.clean else 'yellow' }}">
+            {{ 'clean' if git.clean else (git.dirty_files|string + ' dirty') }}
+          </span>
+          <span class="pill gray">{{ git.branch }}</span>
+        </p>
+        <p style="font-size: 12px; color: var(--text-2); margin-bottom: 12px;">
+          {{ git.remote }}
+        </p>
+        <h3>Recent commits</h3>
+        {% for commit in git.recent_commits %}
+        <div style="font-family: var(--mono); font-size: 12px; padding: 3px 0; color: var(--text-1);">
+          {{ commit }}
+        </div>
+        {% endfor %}
       </div>
     </div>
+
+    <!-- Memory pipeline -->
+    <div class="grid">
+      <div class="card span-12">
+        <h2>Memory Pipeline Queues</h2>
+        <div class="grid" style="margin-bottom: 0;">
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--yellow);">{{ stats.inbox }}</div>
+            <div class="label">Inbox</div>
+          </div>
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--purple);">{{ stats.pending_stable }}</div>
+            <div class="label">Pending Stable</div>
+          </div>
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--green);">{{ stats.active }}</div>
+            <div class="label">Active</div>
+          </div>
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--text-2);">{{ stats.superseded }}</div>
+            <div class="label">Superseded</div>
+          </div>
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--red);">{{ stats.discarded }}</div>
+            <div class="label">Discarded</div>
+          </div>
+          <div class="stat-card span-2">
+            <div class="value" style="color: var(--cyan);">{{ stats.embeddings }}</div>
+            <div class="label">Embeddings</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     {% endif %}
 
-    
-    {% if page == "checkpoints" %}
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- AGENTS                                                            -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "agents" %}
+
+    <p class="page-header" style="margin-top: -20px;">
+      <p>{{ agents | length }} agents configured in <code>openclaw.json</code></p>
+    </p>
+
     <div class="grid">
-      <div class="card span-4">
-        <h2>Heartbeat worker</h2>
-        <p><span class="pill gray">running: {{ heartbeat_worker_status.running }}</span></p>
-        <p class="muted">PID: {{ heartbeat_worker_status.pid }}</p>
-        <p class="muted">Latest committed checkpoint: {{ heartbeat_worker_status.latest_committed_checkpoint_id }}</p>
-        <p class="muted">Last finished: {{ heartbeat_worker_status.last_checkpoint_finished_at }}</p>
-      </div>
-
-      <div class="card span-4">
-        <h2>Tracked path watcher</h2>
-        <p><span class="pill gray">running: {{ tracked_path_watcher_status.running }}</span></p>
-        <p class="muted">PID: {{ tracked_path_watcher_status.pid }}</p>
-        <p class="muted">Watch count: {{ tracked_path_watcher_status.watcher_watch_count }}</p>
-        <p class="muted">Last flush: {{ tracked_path_watcher_status.watcher_last_flush_at_iso or tracked_path_watcher_status.watcher_last_flush_at }}</p>
-      </div>
-
-      <div class="card span-4">
-        <h2>Latest checkpoint</h2>
-        {% if latest_checkpoint %}
-        <p><span class="pill gray">{{ latest_checkpoint.status }}</span></p>
-        <p class="muted">ID: {{ latest_checkpoint.id }}</p>
-        <p class="muted">Trigger: {{ latest_checkpoint.trigger_type }}</p>
-        <p class="muted">Reason: {{ latest_checkpoint.trigger_reason }}</p>
-        {% else %}
-        <p class="muted">No checkpoints yet.</p>
-        {% endif %}
-      </div>
-
       <div class="card span-12">
-        <h2>Recent checkpoints</h2>
         <table>
           <thead>
             <tr>
               <th>ID</th>
-              <th>Status</th>
-              <th>Trigger</th>
-              <th>Reason</th>
-              <th>Started</th>
-              <th>Finished</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in recent_checkpoints %}
-            <tr>
-              <td>{{ row.id }}</td>
-              <td>{{ row.status }}</td>
-              <td>{{ row.trigger_type }}</td>
-              <td>{{ row.trigger_reason }}</td>
-              <td>{{ row.started_at }}</td>
-              <td>{{ row.finished_at or "-" }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="6">No checkpoints recorded yet.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    {% endif %}
-
-    
-{% if page == "heartbeat" %}
-<div class="grid">
-  <div class="card span-6">
-    <h2>Heartbeat worker</h2>
-    <p><span class="pill gray">running: {{ heartbeat_worker_status.running }}</span></p>
-    <p class="muted">PID: {{ heartbeat_worker_status.pid }}</p>
-    <p class="muted">Latest committed checkpoint: {{ heartbeat_worker_status.latest_committed_checkpoint_id }}</p>
-    <p class="muted">Last finished: {{ heartbeat_worker_status.last_checkpoint_finished_at }}</p>
-    <p class="muted">Effective interval: {{ heartbeat_tuning_state.effective_interval }}</p>
-    <form method="post" action="/stack/run-script">
-      <input type="hidden" name="script_name" value="ensure_heartbeat_worker.py">
-      <button type="submit">Ensure heartbeat worker</button>
-    </form>
-  </div>
-
-  <div class="card span-6">
-    <h2>Tracked path watcher</h2>
-    <p><span class="pill gray">running: {{ tracked_path_watcher_status.running }}</span></p>
-    <p class="muted">PID: {{ tracked_path_watcher_status.pid }}</p>
-    <p class="muted">Watch count: {{ tracked_path_watcher_status.watcher_watch_count }}</p>
-    <p class="muted">Last flush: {{ tracked_path_watcher_status.watcher_last_flush_at_iso or tracked_path_watcher_status.watcher_last_flush_at }}</p>
-    <form method="post" action="/stack/run-script">
-      <input type="hidden" name="script_name" value="ensure_tracked_path_watcher.py">
-      <button type="submit">Ensure watcher</button>
-    </form>
-  </div>
-
-  <div class="card span-12">
-    <h2>Heartbeat tuning snapshot</h2>
-    <pre>{{ heartbeat_tuning_state.heartbeat_tuning | tojson(indent=2) }}</pre>
-  </div>
-</div>
-{% endif %}
-
-
-{% if page == "services" %}
-<div class="grid">
-  <div class="card span-12">
-    <h2>Memory stack launcher</h2>
-    <form method="post" action="/stack/action" style="display:inline-block; margin-right: 8px;">
-      <input type="hidden" name="action" value="ensure_memory_stack">
-      <button type="submit">Start / ensure full stack</button>
-    </form>
-    <form method="post" action="/stack/action" style="display:inline-block;">
-      <input type="hidden" name="action" value="stop_memory_stack">
-      <button type="submit">Stop full stack</button>
-    </form>
-    <p class="muted">Starts or verifies watcher, heartbeat worker, and hot search service together.</p>
-  </div>
-
-  <div class="card span-4">
-    <h2>Watcher</h2>
-    <pre>{{ tracked_path_watcher_status | tojson(indent=2) }}</pre>
-  </div>
-
-  <div class="card span-4">
-    <h2>Heartbeat</h2>
-    <pre>{{ heartbeat_worker_status | tojson(indent=2) }}</pre>
-  </div>
-
-  <div class="card span-4">
-    <h2>Search Service</h2>
-    <pre>{{ search_service_status | tojson(indent=2) }}</pre>
-  </div>
-</div>
-{% endif %}
-
-{% if page == "agents" %}
-    <div class="grid">
-      <div class="card span-8">
-        <h2>Agent registry</h2>
-        <table>
-          <thead>
-            <tr>
               <th>Name</th>
-              <th>Role</th>
-              <th>Enabled</th>
-              <th>Pipeline</th>
-              <th>Heartbeat</th>
-              <th>Mode</th>
-              <th>Actions</th>
+              <th>Model</th>
+              <th>Workspace</th>
+              <th>Subagents</th>
             </tr>
           </thead>
           <tbody>
-          {% for a in config.agents %}
+            {% for a in agents %}
             <tr>
-              <td><strong>{{ a.name }}</strong><div class="small muted">shortcut: {{ a.shortcut }}</div></td>
-              <td><span class="pill gray">{{ a.role }}</span></td>
-              <td>{{ "yes" if a.enabled else "no" }}</td>
-              <td>{{ "yes" if a.in_pipeline else "no" }}</td>
-              <td>{{ "yes" if a.heartbeat_enabled else "no" }}</td>
-              <td>{{ a.heartbeat_mode }}</td>
+              <td><strong>{{ a.id }}</strong></td>
+              <td>{{ a.name }}</td>
+              <td><code>{{ a.model }}</code></td>
+              <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
+                <code>{{ a.workspace.split('/')[-1] if '/' in a.workspace else a.workspace }}</code>
+              </td>
               <td>
-                <div class="actions">
-                  <form method="post" action="/agents/toggle"><input type="hidden" name="name" value="{{ a.name }}"><input type="hidden" name="field" value="enabled"><button type="submit">Toggle enabled</button></form>
-                  <form method="post" action="/agents/toggle"><input type="hidden" name="name" value="{{ a.name }}"><input type="hidden" name="field" value="in_pipeline"><button type="submit">Toggle pipeline</button></form>
-                  <form method="post" action="/agents/toggle"><input type="hidden" name="name" value="{{ a.name }}"><input type="hidden" name="field" value="heartbeat_enabled"><button type="submit">Toggle heartbeat</button></form>
-                </div>
+                {% if a.has_subagents %}
+                <span class="pill blue">yes</span>
+                {% else %}
+                <span class="pill gray">no</span>
+                {% endif %}
               </td>
             </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-
-      <div class="card span-4">
-        <h2>Add agent</h2>
-        <form method="post" action="/agents/add">
-          <label>Name<input type="text" name="name" required></label>
-          <label>Role
-            <select name="role">
-              {% for r in role_options %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-            </select>
-          </label>
-          <label>Shortcut<input type="text" name="shortcut"></label>
-          <label>Heartbeat mode
-            <select name="heartbeat_mode">
-              {% for m in heartbeat_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
-            </select>
-          </label>
-          <button class="primary" type="submit">Add agent</button>
-        </form>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if page == "heartbeat" %}
-    <div class="grid">
-      <div class="card span-6">
-        <h2>Global heartbeat settings</h2>
-        <form method="post" action="/heartbeat/save">
-          <label><input type="checkbox" name="heartbeat_enabled" {% if config.heartbeat.heartbeat_enabled %}checked{% endif %}> heartbeat enabled</label>
-          <label>Mode
-            <select name="heartbeat_mode">
-              {% for m in heartbeat_modes %}
-              <option value="{{ m }}" {% if config.heartbeat.heartbeat_mode == m %}selected{% endif %}>{{ m }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Interval seconds<input type="number" name="heartbeat_interval_seconds" value="{{ config.heartbeat.heartbeat_interval_seconds }}"></label>
-          <label>Heartbeat file<input type="text" name="heartbeat_file" value="{{ config.heartbeat.heartbeat_file }}"></label>
-          <label>Heartbeat agent file<input type="text" name="heartbeat_agent_file" value="{{ config.heartbeat.heartbeat_agent_file }}"></label>
-          <button class="primary" type="submit">Save heartbeat settings</button>
-        </form>
-      </div>
-
-      <div class="card span-6">
-        <h2>Tracked paths</h2>
-        <ul class="clean">
-          {% for p in config.tracked_paths %}
-          <li><code>{{ p }}</code></li>
-          {% endfor %}
-        </ul>
-        <form method="post" action="/tracked/add">
-          <label>Add tracked path<input type="text" name="path" required></label>
-          <button type="submit">Add tracked path</button>
-        </form>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if page == "projects" %}
-    <div class="grid">
-      <div class="card span-8">
-        <h2>Project tracker</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>Path</th>
-              <th>current.md</th>
-              <th>Milestones</th>
-              <th>Daily files</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for p in projects %}
-            <tr>
-              <td><a href="/projects/{{ p.name }}">{{ p.name }}</a></td>
-              <td><code>{{ p.path }}</code></td>
-              <td>{{ "yes" if p.has_current else "no" }}</td>
-              <td>{{ p.milestones }}</td>
-              <td>{{ p.daily_count }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-
-      <div class="card span-4">
-        <h2>Add new project</h2>
-        <form method="post" action="/projects/add">
-          <label>Project name<input type="text" name="name" required></label>
-          <button class="primary" type="submit">Create project</button>
-        </form>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if page == "project_detail" %}
-    <div class="grid">
-      <div class="card span-6">
-        <h2>{{ project_name }}</h2>
-        <p class="muted">Project path: <code>{{ project_path }}</code></p>
-        <p>
-          <span class="pill gray">current.md: {{ "yes" if has_current else "no" }}</span>
-          <span class="pill gray">milestones: {{ milestone_files|length }}</span>
-          <span class="pill gray">daily files: {{ daily_files|length }}</span>
-        </p>
-      </div>
-
-      <div class="card span-6">
-        <h2>Quick add files</h2>
-        <form method="post" action="/projects/file/add">
-          <input type="hidden" name="project_name" value="{{ project_name }}">
-          <label>Relative file path<input type="text" name="relative_path" required></label>
-          <button type="submit">Create file</button>
-        </form>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if page == "architecture" %}
-    <div class="grid">
-      <div class="card span-8">
-        <h2>Full memory system graph</h2>
-        <p class="muted">Separated trees, labeled arrows, clickable stage boxes, zoom controls, and two-finger pan inside the graph area.</p>
-
-        <div class="graph-toolbar">
-          <button type="button" id="graph-zoom-out">−</button>
-          <button type="button" id="graph-zoom-reset">100%</button>
-          <button type="button" id="graph-zoom-in">+</button>
-          <span class="zoom-label">Use the buttons on the right to switch details. Graph clicks can be fixed after the page is stable.</span>
-        </div>
-
-        <div class="graph-wrap" id="graph-surface">
-          <div class="graph-canvas" id="graph-canvas">
-            <pre class="mermaid">{{ mermaid_graph }}</pre>
-          </div>
-        </div>
-      </div>
-
-      <div class="card span-4">
-        <h2>Live node detail</h2>
-
-        {% if architecture_details %}
-          <div class="actions" style="margin-bottom:12px; max-height:180px; overflow:auto;">
-            {% for node_id, node in architecture_details.items() %}
-              <button type="button" class="arch-node-btn" data-node-id="{{ node_id }}">{{ node.title }}</button>
             {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% endif %}
+
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- MEMORY                                                            -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "memory" %}
+
+    <div class="grid">
+      <div class="stat-card span-2 accent">
+        <div class="value">{{ stats.total }}</div>
+        <div class="label">Total Items</div>
+      </div>
+      <div class="stat-card span-2 green">
+        <div class="value">{{ stats.active }}</div>
+        <div class="label">Active</div>
+      </div>
+      <div class="stat-card span-2 yellow">
+        <div class="value">{{ stats.inbox }}</div>
+        <div class="label">Inbox</div>
+      </div>
+      <div class="stat-card span-2 purple">
+        <div class="value">{{ stats.embeddings }}</div>
+        <div class="label">Embeddings</div>
+      </div>
+      <div class="stat-card span-2 cyan">
+        <div class="value">{{ stats.code_chunks }}</div>
+        <div class="label">Code Chunks</div>
+      </div>
+      <div class="stat-card span-2">
+        <div class="value">{{ stats.feedback }}</div>
+        <div class="label">Feedback</div>
+      </div>
+    </div>
+
+    <!-- Search -->
+    <div class="grid">
+      <div class="card span-12">
+        <h2>Hybrid Search</h2>
+        <form method="post" action="/memory/search">
+          <div class="search-box">
+            <input type="text" name="query" value="{{ search_query or '' }}"
+                   placeholder="Search memory items..." required>
+            <button type="submit" class="primary">Search</button>
           </div>
+        </form>
 
-          {% for node_id, node in architecture_details.items() %}
-          <div class="arch-detail-panel" id="detail-{{ node_id }}" {% if node_id != first_node_id %}style="display:none;"{% endif %}>
-            <h3>{{ node.title }}</h3>
-            <p>
-              <span class="pill gray" style="border:1px solid {{ node.tree_color }}; color:{{ node.tree_color }}; background:{{ node.tree_color }}22">
-                {{ node.tree_title }}
-              </span>
-            </p>
-            <p class="muted">{{ node.subtitle }}</p>
-
-            <h4>Purpose</h4>
-            <ul class="clean">
-              {% for item in node.purpose %}<li>{{ item }}</li>{% endfor %}
-            </ul>
-
-            <h4>Inputs</h4>
-            <ul class="clean">
-              {% for item in node.inputs %}<li>{{ item }}</li>{% endfor %}
-            </ul>
-
-            <h4>Outputs</h4>
-            <ul class="clean">
-              {% for item in node.outputs %}<li>{{ item }}</li>{% endfor %}
-            </ul>
-
-            <h4>Scripts / files</h4>
-            <ul class="clean">
-              {% for item in node.scripts %}<li><code>{{ item }}</code></li>{% endfor %}
-            </ul>
-
-            <h4>Connected from</h4>
-            <ul class="clean">
-              {% for item in node.connected_from %}<li>{{ item.title }} ({{ item.label }})</li>{% endfor %}
-            </ul>
-
-            <h4>Connected to</h4>
-            <ul class="clean">
-              {% for item in node.connected_to %}<li>{{ item.title }} ({{ item.label }})</li>{% endfor %}
-            </ul>
+        {% if search_results %}
+        {% for r in search_results %}
+        <div class="search-result">
+          <div class="score">
+            score: {{ "%.3f" | format(r.final_score or r.score or 0) }}
+            {% if r.entity %}<span class="pill gray" style="margin-left: 8px;">{{ r.entity }}</span>{% endif %}
+            {% if r.property %}<span class="pill gray">{{ r.property }}</span>{% endif %}
           </div>
-          {% endfor %}
-        {% else %}
-          <p class="muted">No architecture details loaded.</p>
+          <div class="text">{{ r.text[:300] }}{% if r.text and r.text|length > 300 %}...{% endif %}</div>
+        </div>
+        {% endfor %}
+        {% elif search_query %}
+        <p style="color: var(--text-2); padding: 20px 0;">No results for "{{ search_query }}"</p>
         {% endif %}
       </div>
     </div>
+
+    <!-- Recent items -->
+    <div class="grid">
+      <div class="card span-12">
+        <h2>Recent Memory Items</h2>
+        {% for item in recent %}
+        <div class="mem-item">
+          <div class="meta">
+            <span class="pill {{ 'green' if item.status == 'active' else 'gray' }}">{{ item.status }}</span>
+            <span class="pill gray">{{ item.memory_type or 'unknown' }}</span>
+            <code style="margin-left: 8px;">{{ item.id }}</code>
+            {% if item.entity %}<span style="margin-left: 8px;">{{ item.entity }} → {{ item.property }}: {{ item.value }}</span>{% endif %}
+          </div>
+          <div class="text">{{ item.text[:200] if item.text else '(empty)' }}{% if item.text and item.text|length > 200 %}...{% endif %}</div>
+        </div>
+        {% else %}
+        <p style="color: var(--text-2);">No memory items found.</p>
+        {% endfor %}
+      </div>
+    </div>
+
     {% endif %}
 
-    {% if page == "architecture_node" %}
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- CODE GRAPH                                                        -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "code-graph" %}
+
+    <div class="grid">
+      <!-- Neo4j -->
+      <div class="card span-6">
+        <h2>Neo4j Knowledge Graph</h2>
+        <p style="margin-bottom: 12px;">
+          <span class="pill {{ 'green' if neo4j.status == 'online' else 'red' }}">{{ neo4j.status }}</span>
+          <span class="pill gray">{{ neo4j.total_nodes }} nodes</span>
+          <span class="pill gray">{{ neo4j.total_relationships }} relationships</span>
+        </p>
+
+        <h3>Node types</h3>
+        <table>
+          <thead><tr><th>Label</th><th>Count</th></tr></thead>
+          <tbody>
+            {% for label, count in neo4j.nodes.items() %}
+            <tr>
+              <td><span class="pill purple">{{ label }}</span></td>
+              <td>{{ count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        <h3>Relationship types</h3>
+        <table>
+          <thead><tr><th>Type</th><th>Count</th></tr></thead>
+          <tbody>
+            {% for rel, count in neo4j.relationships.items() %}
+            <tr>
+              <td><span class="pill cyan">{{ rel }}</span></td>
+              <td>{{ count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Qdrant -->
+      <div class="card span-6">
+        <h2>Qdrant Vector Store</h2>
+        <p style="margin-bottom: 12px;">
+          <span class="pill {{ 'green' if qdrant.status == 'online' else 'red' }}">{{ qdrant.status }}</span>
+        </p>
+
+        {% for name, col in qdrant.collections.items() %}
+        <div style="padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; background: var(--bg-2);">
+          <div style="font-weight: 600; margin-bottom: 6px;">{{ name }}</div>
+          <span class="pill gray">{{ col.points }} points</span>
+          <span class="pill gray">{{ col.vectors }} vectors</span>
+          <span class="pill {{ 'green' if col.status == 'green' else 'yellow' }}">{{ col.status }}</span>
+        </div>
+        {% else %}
+        <p style="color: var(--text-2);">No collections found.</p>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% endif %}
+
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- TESTS                                                             -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "tests" %}
+
+    <div class="grid">
+      <div class="card span-12">
+        <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
+          <h2 style="margin: 0;">Test Suite</h2>
+          <form method="post" action="/tests/run" style="margin: 0;">
+            <button type="submit" class="primary">▶ Run Tests</button>
+          </form>
+        </div>
+
+        {% if tests.passed > 0 or tests.failed > 0 %}
+        <div style="display: flex; gap: 16px; margin-bottom: 16px;">
+          <div class="stat-card green" style="flex: 1;">
+            <div class="value">{{ tests.passed }}</div>
+            <div class="label">Passed</div>
+          </div>
+          <div class="stat-card {{ 'red' if tests.failed > 0 else '' }}" style="flex: 1;">
+            <div class="value">{{ tests.failed }}</div>
+            <div class="label">Failed</div>
+          </div>
+          <div class="stat-card" style="flex: 1;">
+            <div class="value">{{ tests.exit_code }}</div>
+            <div class="label">Exit Code</div>
+          </div>
+        </div>
+        <p style="color: var(--text-2); font-size: 12px; margin-bottom: 12px;">
+          Last run: {{ tests.run_at }}
+        </p>
+        {% endif %}
+
+        {% if tests.output %}
+        <pre>{{ tests.output }}</pre>
+        {% else %}
+        <p style="color: var(--text-2); padding: 40px 0; text-align: center;">
+          Click "Run Tests" to execute the full pytest suite (466 tests).
+        </p>
+        {% endif %}
+      </div>
+    </div>
+
+    {% endif %}
+
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- BENCHMARKS                                                        -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "benchmarks" %}
+
+    <div class="grid">
+      <div class="card span-12">
+        <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
+          <h2 style="margin: 0;">Retrieval Benchmark</h2>
+          <form method="post" action="/benchmarks/run" style="margin: 0;">
+            <button type="submit" class="primary">▶ Run Benchmark</button>
+          </form>
+        </div>
+
+        {% if benchmark %}
+          {% if benchmark.mrr is defined %}
+          <div style="display: flex; gap: 16px; margin-bottom: 16px;">
+            <div class="stat-card accent" style="flex: 1;">
+              <div class="value">{{ "%.2f" | format(benchmark.mrr or 0) }}</div>
+              <div class="label">MRR</div>
+            </div>
+            <div class="stat-card green" style="flex: 1;">
+              <div class="value">{{ "%.2f" | format(benchmark.precision_at_1 or benchmark.get('precision@1', 0)) }}</div>
+              <div class="label">Precision@1</div>
+            </div>
+            <div class="stat-card purple" style="flex: 1;">
+              <div class="value">{{ "%.2f" | format(benchmark.ndcg_at_5 or benchmark.get('ndcg@5', 0)) }}</div>
+              <div class="label">nDCG@5</div>
+            </div>
+            <div class="stat-card cyan" style="flex: 1;">
+              <div class="value">{{ "%.2f" | format(benchmark.recall_at_10 or benchmark.get('recall@10', 0)) }}</div>
+              <div class="label">Recall@10</div>
+            </div>
+          </div>
+          {% endif %}
+
+          <pre>{{ benchmark | tojson(indent=2) }}</pre>
+        {% else %}
+        <p style="color: var(--text-2); padding: 40px 0; text-align: center;">
+          Click "Run Benchmark" to evaluate retrieval quality against the golden dataset.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+
+    {% endif %}
+
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- SERVICES                                                          -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "services" %}
+
     <div class="grid">
       <div class="card span-6">
-        <h2>{{ node.title }}</h2>
-        <p>
-          <span class="pill gray" style="border:1px solid {{ node.tree_color }}; color:{{ node.tree_color }}; background:{{ node.tree_color }}22">
-            {{ node.tree_title }}
-          </span>
-        </p>
-        <p class="muted">{{ node.subtitle }}</p>
-        <h3>Scripts in this block</h3>
-        <ul class="clean">
-          {% for s in node.scripts %}
-          <li><code>{{ s }}</code></li>
-          {% endfor %}
-        </ul>
+        <h2>Docker Containers</h2>
+        {% for c in containers %}
+        <div class="container-row">
+          <div class="container-dot {{ 'up' if 'Up' in c.status else 'down' }}"></div>
+          <div class="container-name">{{ c.name }}</div>
+          <div class="container-status">{{ c.status }}</div>
+        </div>
+        {% else %}
+        <p style="color: var(--text-2);">No containers found.</p>
+        {% endfor %}
       </div>
 
       <div class="card span-6">
-        <h3>Responsibilities</h3>
-        <ul class="clean">
-          {% for d in node.details %}
-          <li>{{ d }}</li>
-          {% endfor %}
-        </ul>
+        <h2>Background Workers</h2>
+        {% for key, svc in services.items() %}
+        <div class="container-row">
+          <div class="container-dot {{ 'up' if svc.running else 'down' }}"></div>
+          <div class="container-name">{{ svc.name }}</div>
+          <div class="container-status">
+            {% if svc.running %}
+            <span class="pill green">running</span> PID {{ svc.pid }}
+            {% else %}
+            <span class="pill red">stopped</span>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
       </div>
     </div>
+
     {% endif %}
 
-    {% if page == "commands" %}
-    <div class="card span-12">
-      <h2>Commands</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Command</th>
-            <th>Run</th>
-          </tr>
-        </thead>
-        <tbody>
-        {% for name, cmd in config.commands.items() %}
-          <tr>
-            <td>{{ name }}</td>
-            <td><code>{{ cmd }}</code></td>
-            <td>
-              <form method="post" action="/run">
-                <input type="hidden" name="command_name" value="{{ name }}">
-                <button type="submit">Run</button>
-              </form>
-            </td>
-          </tr>
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- GIT                                                               -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "git" %}
+
+    <div class="grid">
+      <div class="card span-12">
+        <p style="margin-bottom: 16px;">
+          <span class="pill {{ 'green' if git.clean else 'yellow' }}">
+            {{ 'clean repo' if git.clean else (git.dirty_files|string + ' dirty files') }}
+          </span>
+          <span class="pill blue">{{ git.branch }}</span>
+        </p>
+        <p style="color: var(--text-2); font-size: 13px; margin-bottom: 20px;">
+          Remote: <code>{{ git.remote }}</code>
+        </p>
+
+        <h3>Recent commits</h3>
+        {% for commit in git.recent_commits %}
+        <div style="font-family: var(--mono); font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--border); color: var(--text-1);">
+          {{ commit }}
+        </div>
         {% endfor %}
-        </tbody>
-      </table>
+
+        {% if git.dirty_list %}
+        <h3 style="margin-top: 20px;">Modified files</h3>
+        {% for f in git.dirty_list %}
+        <div style="font-family: var(--mono); font-size: 12px; padding: 4px 0; color: var(--yellow);">
+          {{ f }}
+        </div>
+        {% endfor %}
+        {% endif %}
+      </div>
     </div>
+
     {% endif %}
 
-    <div class="card span-12" style="margin-top:16px;">
-      <h2>Last command output</h2>
-      <p>
-        <span class="pill {% if last_status == 'success' %}success{% elif last_status == 'error' %}error{% else %}gray{% endif %}">
-          {{ last_status }}
-        </span>
-        <span class="pill gray">run at: {{ last_run_at if last_run_at else "not run yet" }}</span>
-      </p>
-      <pre>{{ last_output }}</pre>
-    </div>
-  </div>
+  </main>
+</div>
 
-  {% if page == "architecture" %}
-  <script>
-    window.OPENCLAW_ARCH_FIRST_NODE = "{{ first_node_id }}";
-    window.OPENCLAW_ARCH_NODE_IDS = [{% for node_id in architecture_details.keys() %}"{{ node_id }}"{% if not loop.last %}, {% endif %}{% endfor %}];
-  </script>
-  {% endif %}
-
-{% if page == "overview" %}
-<script>
-  setTimeout(() => {
-    window.location.reload();
-  }, 15000);
-</script>
+{% if page == "dashboard" %}
+<script>setTimeout(() => window.location.reload(), 30000);</script>
 {% endif %}
 
 </body>

@@ -1,74 +1,41 @@
+"""Control panel configuration — paths, constants, defaults."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
-
-CONTROL_PANEL_DIR = WORKSPACE / ".memory-index" / "control_panel"
-CONTROL_DIR = CONTROL_PANEL_DIR
-
-CONFIG_PATH = CONTROL_PANEL_DIR / "control_panel_config.json"
-SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
-MEMORY_DIR = WORKSPACE / "memory"
-PROJECTS_DIR = MEMORY_DIR / "projects"
+MEMORY_INDEX = WORKSPACE / ".memory-index"
+CONTROL_PANEL_DIR = MEMORY_INDEX / "control_panel"
+SCRIPTS_DIR = MEMORY_INDEX / "scripts"
+OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 
 DEFAULT_PORT = int(os.environ.get("OPENCLAW_CONTROL_PANEL_PORT", "8788"))
-ROLE_OPTIONS = [
-    "orchestrator",
-    "builder",
-    "reviewer",
-    "tester",
-    "planner",
-    "researcher",
-    "memory",
-    "custom",
-]
+PY = os.environ.get(
+    "OPENCLAW_MEMORY_PY",
+    str(Path.home() / ".openclaw" / "venvs" / "memory-db" / "bin" / "python"),
+)
+DB_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
+NEO4J_URI = os.environ.get("OPENCLAW_NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.environ.get("OPENCLAW_NEO4J_USER", "neo4j")
+NEO4J_PASS = os.environ.get("OPENCLAW_NEO4J_PASSWORD", "neo4jpassword")
+QDRANT_URL = os.environ.get("OPENCLAW_QDRANT_URL", "http://localhost:6333")
 
-HEARTBEAT_MODES = ["off", "light", "standard", "strict"]
 
-DEFAULT_CONFIG = {
-    "agents": [
-        {
-            "name": "main",
-            "enabled": True,
-            "in_pipeline": True,
-            "role": "orchestrator",
-            "heartbeat_enabled": True,
-            "heartbeat_mode": "strict",
-            "shortcut": "main",
-        },
-        {
-            "name": "builder_ai",
-            "enabled": True,
-            "in_pipeline": True,
-            "role": "builder",
-            "heartbeat_enabled": True,
-            "heartbeat_mode": "standard",
-            "shortcut": "build",
-        },
-    ],
-    "tracked_paths": [
-        str(WORKSPACE / "memory"),
-        str(WORKSPACE / "MEMORY.md"),
-    ],
-    "pipeline": {
-        "judge_enabled": True,
-        "embedding_enabled": True,
-        "auto_promote_enabled": True,
-        "pending_stable_required": True,
-    },
-    "heartbeat": {
-        "heartbeat_enabled": True,
-        "heartbeat_mode": "strict",
-        "heartbeat_interval_seconds": 300,
-        "heartbeat_file": str(WORKSPACE / "HEARTBEAT.md"),
-        "heartbeat_agent_file": str(WORKSPACE / "HEARTBEAT_AGENTS.md"),
-    },
-    "commands": {
-        "maintenance_cycle": f"python3 {SCRIPTS_DIR / 'run_memory_maintenance_cycle.py'}",
-        "embed_active": f"python3 {SCRIPTS_DIR / 'embed_memory_items.py'} --batch-size 64",
-        "sync_markdown": f"python3 {SCRIPTS_DIR / 'sync_registry_to_markdown.py'}",
-        "show_queue": f"python3 {SCRIPTS_DIR / 'show_review_queue.py'} --limit 20",
-    },
-}
+def load_openclaw_config() -> dict:
+    """Load the real OpenClaw config from openclaw.json."""
+    try:
+        # openclaw.json uses JSON5 (trailing commas, comments) — try json5 first
+        text = OPENCLAW_CONFIG.read_text(encoding="utf-8")
+        try:
+            import json5
+            return json5.loads(text)
+        except ImportError:
+            pass
+        # Fallback: strip trailing commas crudely and parse
+        import re
+        cleaned = re.sub(r',\s*([}\]])', r'\1', text)
+        return json.loads(cleaned)
+    except Exception:
+        return {}
