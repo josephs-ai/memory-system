@@ -2,6 +2,7 @@
 PostgreSQL database operations for memory items — CRUD, feedback tracking,
 retrieval logging, and schema management. Core data layer for the memory system.
 """
+import atexit
 import os
 from pathlib import Path
 
@@ -1058,7 +1059,14 @@ def hybrid_search_memory_items(
             return rows
 
 def close_pool():
-    POOL.close()
+    """Shut down the connection pool and its background threads."""
+    try:
+        POOL.close()
+    except Exception:
+        pass
+
+
+atexit.register(close_pool)
 
 def count_memory_items():
     with POOL.connection() as conn:

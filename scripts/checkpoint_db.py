@@ -5,6 +5,7 @@ Key functions: load_env_file, close_pool, ensure_checkpoint_tables, mark_stale_p
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 from contextlib import contextmanager
@@ -55,10 +56,14 @@ POOL = ConnectionPool(
 
 
 def close_pool() -> None:
+    """Shut down the connection pool and its background threads."""
     try:
         POOL.close()
     except Exception:
         pass
+
+
+atexit.register(close_pool)
 
 
 def ensure_checkpoint_tables() -> None:
