@@ -279,7 +279,8 @@ def run_tests() -> dict[str, Any]:
     global _last_test_cache
     try:
         proc = subprocess.run(
-            ["python3", "-m", "pytest", "scripts/", "-q", "--tb=line",
+            ["python3", "-m", "pytest", "scripts/", "--tb=line",
+             "-W", "ignore",
              "--ignore=scripts/hybrid_search_cli.py"],
             capture_output=True, text=True, timeout=120,
             cwd=str(MEMORY_INDEX),

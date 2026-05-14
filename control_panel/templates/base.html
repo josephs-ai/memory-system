@@ -544,161 +544,312 @@
     <!-- ────────────────────────────────────────────────────────────────── -->
     {% if page == "architecture" %}
 
+    <style>
+      #arch-container {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: #060a12;
+        height: 700px;
+        cursor: grab;
+      }
+      #arch-container:active { cursor: grabbing; }
+      #arch-inner {
+        transform-origin: 0 0;
+        transition: transform 0.1s ease-out;
+        padding: 20px;
+        display: inline-block;
+        min-width: 1800px;
+      }
+      .zoom-controls {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        z-index: 5;
+        display: flex;
+        gap: 4px;
+      }
+      .zoom-controls button {
+        width: 36px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        padding: 0;
+        background: var(--bg-1);
+        border: 1px solid var(--border-light);
+      }
+      .zoom-level {
+        font-size: 11px;
+        color: var(--text-2);
+        padding: 8px 10px;
+        background: var(--bg-1);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        line-height: 20px;
+      }
+    </style>
+
     <div class="grid">
-      <div class="card span-12">
-        <h2>Full Memory System Architecture</h2>
-        <p style="color: var(--text-2); margin-bottom: 16px;">
-          Complete data flow from transcript ingestion through retrieval. Click nodes for details.
-        </p>
-        <div id="arch-diagram">
-          <pre class="mermaid">
+      <div class="card span-12" style="padding: 0; overflow: hidden;">
+        <div style="padding: 20px 20px 0;">
+          <h2>Full Memory System Architecture</h2>
+          <p style="color: var(--text-2); margin-bottom: 12px;">
+            Scroll to zoom · Drag to pan · Full data flow with script names and live counts
+          </p>
+        </div>
+        <div id="arch-container">
+          <div class="zoom-controls">
+            <button type="button" id="zoom-out">−</button>
+            <span class="zoom-level" id="zoom-label">100%</span>
+            <button type="button" id="zoom-in">+</button>
+            <button type="button" id="zoom-fit">⊞</button>
+          </div>
+          <div id="arch-inner">
+            <pre class="mermaid">
 flowchart TB
+
+    subgraph SOURCES["📁 Data Sources"]
+        direction TB
+        FS["File System<br/><code>~/.openclaw/workspace/</code><br/><small>MEMORY.md · memory/*.md<br/>session transcripts · agent workspaces</small>"]
+        SL["Session Logs<br/><code>~/.openclaw/sessions/</code><br/><small>agent conversations<br/>tool calls · completions</small>"]
+        OC_CFG["OpenClaw Config<br/><code>openclaw.json</code><br/><small>25 agents · model routing<br/>channel config · tool policies</small>"]
+    end
+
     subgraph INGEST["📥 Ingestion Layer"]
-        direction LR
-        TP["Tracked Path Watcher<br/><small>inotify · file changes</small>"]
-        HB["Heartbeat Worker<br/><small>periodic checkpoints</small>"]
-        TX["Transcript Dehydrator<br/><small>session logs → chunks</small>"]
+        direction TB
+        TP["Tracked Path Watcher<br/><code>tracked_path_watcher.py</code><br/><small>inotify file monitoring<br/>debounced change detection<br/>PID: runtime/tracked_path_watcher.pid</small>"]
+        HB["Heartbeat Worker<br/><code>heartbeat_worker.py</code><br/><small>periodic checkpoint creation<br/>adaptive interval tuning<br/>PID: runtime/heartbeat_worker.pid</small>"]
+        TX["Transcript Dehydrator<br/><code>dehydrate_transcript.py</code><br/><small>session JSON → semantic chunks<br/>speaker attribution · timestamp preservation<br/>tool-call extraction</small>"]
+        CP_DB["Checkpoint DB<br/><code>checkpoint_db.py</code><br/><small>crash recovery state<br/>processing checkpoints<br/>stale detection + mark</small>"]
     end
 
     subgraph PROCESS["⚙️ Processing Pipeline"]
-        direction LR
-        CK["Chunker<br/><small>semantic splitting</small>"]
-        JG["Memory Judge<br/><small>relevance scoring</small>"]
-        EF["Field Extractor<br/><small>entity · property · value</small>"]
-        RT["Router<br/><small>inbox → active/discard</small>"]
+        direction TB
+        CK["Semantic Chunker<br/><code>extract_chunks.py</code><br/><small>context-aware splitting<br/>overlap windows<br/>chunk_id generation</small>"]
+        JG["Memory Judge<br/><code>judge_memory.py</code><br/><small>LLM-based relevance scoring<br/>importance classification<br/>sensitivity tagging</small>"]
+        EF["Field Extractor<br/><code>extract_memory_fields.py</code><br/><small>entity · property · value<br/>memory_type classification<br/>confidence scoring</small>"]
+        RT["Memory Router<br/><code>route_memory.py</code><br/><small>inbox → pending_stable → active<br/>auto-promote rules<br/>conflict detection</small>"]
+        PM["Promotion Engine<br/><code>process_auto_promote.py</code><br/><small>pending_stable → active<br/>duplicate detection<br/>supersession logic</small>"]
+        DM["Auto Demoter<br/><code>auto_demote_bad_items.py</code><br/><small>low-utility detection<br/>feedback-based demotion<br/>stale item cleanup</small>"]
     end
 
     subgraph STORE["💾 Storage Layer"]
-        direction LR
-        PG[("PostgreSQL<br/><small>18,686 memory items<br/>1,058 code chunks</small>")]
-        QD[("Qdrant<br/><small>18,602 + 1,266 vectors<br/>2 collections</small>")]
-        N4[("Neo4j<br/><small>1,308 nodes<br/>2,686 relationships</small>")]
+        direction TB
+        PG[("PostgreSQL<br/><small><b>18,686</b> memory_items<br/><b>1,058</b> code_chunks<br/>memory_inbox · memory_pending_stable<br/>memory_discarded · retrieval_feedback<br/>memory_item_embeddings<br/>schema_migrations</small>")]
+        QD[("Qdrant Vector Store<br/><small><b>memory_items</b>: 18,602 pts · 384d<br/><b>code_chunks</b>: 1,266 pts · 384d<br/>cosine similarity<br/>HNSW index</small>")]
+        N4[("Neo4j Graph DB<br/><small><b>1,308 nodes</b>:<br/>Function(860) · CodeModule(202)<br/>CodeFile(160) · Class(41)<br/>MemoryItem(28) · Entity(3)<br/><b>2,686 relationships</b>:<br/>IMPORTS · CALLS · DEFINES<br/>HAS_METHOD · ABOUT_CODE<br/>ABOUT_ENTITY · CONTAINS</small>")]
+    end
+
+    subgraph EMBED["🧬 Embedding Pipeline"]
+        direction TB
+        ME["Memory Embedder<br/><code>embed_memory_items.py</code><br/><small>all-MiniLM-L6-v2 (384d)<br/>batch encoding · upsert to PG + Qdrant<br/>incremental: only new/changed items</small>"]
+        CE["Code Embedder<br/><code>embed_code_chunks.py</code><br/><small>same model · code_chunks collection<br/>function bodies + docstrings<br/>qualified_name metadata</small>"]
     end
 
     subgraph CODE["🔗 Zero-Reread Code Engine"]
-        direction LR
-        AST["AST Parser<br/><small>Python · C++ · tree-sitter</small>"]
-        EMB["Code Embedder<br/><small>MiniLM → Qdrant</small>"]
-        GR["Graph Sync<br/><small>IMPORTS · CALLS · DEFINES</small>"]
-        REC["Reconciliation<br/><small>hash-based auto-repair</small>"]
+        direction TB
+        AST["AST Parser<br/><code>parse_code_ast.py</code><br/><small>Python: ast module<br/>C++: tree-sitter + UE macros<br/>141 files → 965 chunks<br/>functions · classes · imports</small>"]
+        GR["Graph Sync<br/><code>sync_code_graph.py</code><br/><small>populate Neo4j from AST<br/>IMPORTS · CALLS · DEFINES edges<br/>HAS_METHOD · CONTAINS<br/>1,104 nodes · 2,319 rels</small>"]
+        REC["Reconciliation Daemon<br/><code>reconciliation_daemon.py</code><br/><small>full-tree hash comparison<br/>detect missed/changed files<br/>auto-repair pipeline<br/>health JSON artifact</small>"]
+        HOOK["File Watcher Hook<br/><code>code_index_hook.py</code><br/><small>parse → embed → graph<br/>triggered on file save<br/>~5s end-to-end latency</small>"]
+        BRIDGE["ABOUT_CODE Bridge<br/><code>sync_code_graph.py</code><br/><small>46 edges linking memory → code<br/>5-strategy deterministic matching<br/>no LLM required</small>"]
     end
 
     subgraph RETRIEVE["🔍 Retrieval Layer"]
-        direction LR
-        HS["Hybrid Search<br/><small>pgvector + FTS + Qdrant</small>"]
-        CH["Context Hydrator<br/><small>code + memory + graph</small>"]
-        RR["Cross-Encoder Reranker<br/><small>relevance reranking</small>"]
-        AB["ABOUT_CODE Bridge<br/><small>memory ↔ code links</small>"]
+        direction TB
+        HS["Hybrid Search<br/><code>memory_db.hybrid_search</code><br/><small>pgvector cosine + ts_rank FTS<br/>RRF score fusion<br/>status/sensitivity filtering<br/>project_id scoping</small>"]
+        QS["Qdrant Search<br/><code>qdrant_client</code><br/><small>ANN vector search<br/>memory_items + code_chunks<br/>metadata filtering</small>"]
+        CH["Context Hydrator<br/><code>context_hydrator.py</code><br/><small>unified code + memory + graph<br/>token-optimized output<br/>blast radius via Neo4j<br/>function bodies + signatures</small>"]
+        RR["Cross-Encoder Reranker<br/><code>context_hydrator.py</code><br/><small>71ms overhead<br/>relevance reranking<br/>integrated into /context</small>"]
+        FB["Feedback Engine<br/><code>feedback_score_engine.py</code><br/><small>retrieval logging<br/>query-type learning<br/>utility scoring</small>"]
     end
 
     subgraph SERVE["🌐 Serving Layer"]
-        direction LR
-        API["FastAPI Search Service<br/><small>/context endpoint</small>"]
-        CP["Control Panel<br/><small>this dashboard</small>"]
-        OC["OpenClaw Agents<br/><small>25 agents · multi-model</small>"]
+        direction TB
+        API["Search Service<br/><code>search_service_code_context.py</code><br/><small>FastAPI · /context endpoint<br/>backward compatible<br/>code + memory retrieval</small>"]
+        CTRL["Control Panel<br/><code>control_panel/</code><br/><small>this dashboard<br/>9 pages · live data<br/>benchmark runner</small>"]
+        OC_AGT["OpenClaw Agents<br/><small>25 agents across 6 models<br/>Opus · Sonnet · GPT-5.4<br/>Gemini Pro · Copilot<br/>memory_search integration</small>"]
+        BENCH["Benchmark Suite<br/><code>retrieval_benchmark.py</code><br/><small>10 golden queries<br/>MRR 0.80 · P@1 0.80<br/>regression detection</small>"]
     end
 
-    subgraph ORCH["🎮 70-Level Orchestrator"]
-        direction LR
-        CD["Conductor<br/><small>10-phase governor</small>"]
-        WI["Work Items<br/><small>plan→build→test→ship</small>"]
-        LLM["Multi-Model Bridge<br/><small>Opus · GPT · Gemini</small>"]
-        ART["Asset Pipeline<br/><small>gpt-image-1 art gen</small>"]
+    subgraph MAINTAIN["🔧 Maintenance"]
+        direction TB
+        MNT["Maintenance Cycle<br/><code>run_memory_maintenance_cycle.py</code><br/><small>consolidation · cleanup<br/>embedding refresh<br/>stale checkpoint repair</small>"]
+        SYNC["Registry Sync<br/><code>sync_registry_to_markdown.py</code><br/><small>DB → markdown files<br/>human-readable export<br/>git-trackable output</small>"]
+        CON["Consolidation Grouper<br/><code>consolidation_grouper.py</code><br/><small>semantic deduplication<br/>group similar memories<br/>merge candidates</small>"]
+        SUM["Summary Generator<br/><code>summary_generator.py</code><br/><small>progressive summarization<br/>temporal reasoning<br/>knowledge distillation</small>"]
     end
 
-    INGEST --> PROCESS
-    PROCESS --> PG
-    PG --> QD
-    PG --> N4
+    subgraph ORCH["🎮 70-Level Enterprise Orchestrator"]
+        direction TB
+        CD["Conductor V2<br/><code>orchestrator/conductor/</code><br/><small>10-phase sequential governor<br/>HITL gates · crash-safe resume<br/>budget exhaustion halting<br/>49 tests</small>"]
+        SM["State Machine<br/><code>state_machine.py</code><br/><small>work item lifecycle<br/>plan→design→build→review→test→ship<br/>role-based transitions</small>"]
+        LLM["Multi-Model Bridge<br/><code>model_routing.py</code><br/><small>Opus (planning) · Sonnet (building)<br/>GPT-5.4 (review) · Gemini (testing)<br/>universal_wrapper.py</small>"]
+        ART["Art Pipeline<br/><code>adapter_art_generator.py</code><br/><small>Gemini prompt → gpt-image-1<br/>sprite · background · UI art<br/>output_format: png</small>"]
+        ECON["Economy Sim<br/><code>economy_simulation.py</code><br/><small>100K Monte Carlo encounters<br/>TTK · win-rate · drop-rate<br/>balance validation</small>"]
+        LEGAL["Legal & Compliance<br/><code>compliance_checker.py</code><br/><small>ESRB/PEGI auto-rating<br/>COPPA · OSS attribution<br/>EULA drafting · HITL lock</small>"]
+    end
 
-    CODE --> QD
-    CODE --> N4
-    CODE --> PG
+    FS -->|"file changes"| TP
+    SL -->|"transcripts"| TX
+    TP -->|"change events"| CK
+    HB -->|"timer tick"| CP_DB
+    TX -->|"chunks"| CK
+    
+    CK -->|"raw chunks"| JG
+    JG -->|"scored"| EF
+    EF -->|"structured"| RT
+    RT -->|"approved"| PM
+    RT -->|"rejected"| DM
+    PM -->|"promoted"| PG
+    DM -->|"demoted"| PG
 
-    PG --> RETRIEVE
-    QD --> RETRIEVE
-    N4 --> RETRIEVE
+    PG -->|"items"| ME
+    ME -->|"vectors"| QD
+    ME -->|"embeddings"| PG
 
-    RETRIEVE --> API
-    API --> OC
-    API --> CP
+    AST -->|"parsed chunks"| CE
+    CE -->|"vectors"| QD
+    AST -->|"AST data"| GR
+    GR -->|"nodes+rels"| N4
+    REC -->|"repair"| AST
+    HOOK -->|"trigger"| AST
+    BRIDGE -->|"links"| N4
 
-    ORCH --> LLM
-    ORCH --> API
-    ORCH --> PG
+    PG -->|"SQL queries"| HS
+    QD -->|"ANN search"| QS
+    N4 -->|"graph traversal"| CH
+    HS -->|"candidates"| CH
+    QS -->|"candidates"| CH
+    CH -->|"context pack"| RR
+    RR -->|"reranked"| API
+    FB -->|"feedback"| PG
 
-    TP -.->|"file events"| CK
-    HB -.->|"checkpoints"| TX
-    AST -.->|"parse"| EMB
-    EMB -.->|"embed"| GR
-    HS -.->|"candidates"| RR
-    CH -.->|"hydrate"| AB
-    CD -.->|"dispatch"| WI
+    API -->|"context"| OC_AGT
+    API -->|"data"| CTRL
+    API -->|"queries"| BENCH
 
-    classDef ingest fill:#1e3a5f,stroke:#3b82f6,color:#e0f2fe
-    classDef process fill:#1a2e1a,stroke:#22c55e,color:#dcfce7
-    classDef store fill:#2e1065,stroke:#a78bfa,color:#f3e8ff
-    classDef code fill:#0c4a4a,stroke:#22d3ee,color:#cffafe
-    classDef retrieve fill:#422006,stroke:#eab308,color:#fef9c3
-    classDef serve fill:#450a0a,stroke:#ef4444,color:#fee2e2
-    classDef orch fill:#312e81,stroke:#818cf8,color:#e0e7ff
+    MNT -->|"cleanup"| PG
+    SYNC -->|"export"| FS
+    CON -->|"groups"| PG
+    SUM -->|"summaries"| PG
 
-    class TP,HB,TX ingest
-    class CK,JG,EF,RT process
+    CD -->|"dispatch"| SM
+    SM -->|"transitions"| LLM
+    LLM -->|"generation"| PG
+    ART -->|"assets"| PG
+    ECON -->|"validation"| PG
+    LEGAL -->|"compliance"| PG
+    CD -->|"context"| API
+
+    classDef sources fill:#1a1a2e,stroke:#4a5568,color:#e0e0e0,stroke-width:2px
+    classDef ingest fill:#1e3a5f,stroke:#3b82f6,color:#e0f2fe,stroke-width:2px
+    classDef process fill:#1a2e1a,stroke:#22c55e,color:#dcfce7,stroke-width:2px
+    classDef store fill:#2e1065,stroke:#a78bfa,color:#f3e8ff,stroke-width:2px
+    classDef embed fill:#1a3333,stroke:#2dd4bf,color:#cffafe,stroke-width:2px
+    classDef code fill:#0c4a4a,stroke:#22d3ee,color:#cffafe,stroke-width:2px
+    classDef retrieve fill:#422006,stroke:#eab308,color:#fef9c3,stroke-width:2px
+    classDef serve fill:#3b1010,stroke:#ef4444,color:#fee2e2,stroke-width:2px
+    classDef maintain fill:#2d2d1a,stroke:#a3a310,color:#fef9c3,stroke-width:2px
+    classDef orch fill:#312e81,stroke:#818cf8,color:#e0e7ff,stroke-width:2px
+
+    class FS,SL,OC_CFG sources
+    class TP,HB,TX,CP_DB ingest
+    class CK,JG,EF,RT,PM,DM process
     class PG,QD,N4 store
-    class AST,EMB,GR,REC code
-    class HS,CH,RR,AB retrieve
-    class API,CP,OC serve
-    class CD,WI,LLM,ART orch
-          </pre>
+    class ME,CE embed
+    class AST,GR,REC,HOOK,BRIDGE code
+    class HS,QS,CH,RR,FB retrieve
+    class API,CTRL,OC_AGT,BENCH serve
+    class MNT,SYNC,CON,SUM maintain
+    class CD,SM,LLM,ART,ECON,LEGAL orch
+            </pre>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Architecture legend -->
     <div class="grid">
-      <div class="card span-4">
+      <div class="card span-3">
+        <h2>📁 Sources</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill gray">File System</span> workspace files, MEMORY.md</li>
+          <li style="padding: 3px 0;"><span class="pill gray">Session Logs</span> agent conversations</li>
+          <li style="padding: 3px 0;"><span class="pill gray">OpenClaw Config</span> 25 agents, models</li>
+        </ul>
+      </div>
+      <div class="card span-3">
         <h2>📥 Ingestion</h2>
-        <ul style="list-style: none; padding: 0;">
-          <li style="padding: 4px 0;"><span class="pill blue">Tracked Path Watcher</span> inotify-based file monitoring</li>
-          <li style="padding: 4px 0;"><span class="pill blue">Heartbeat Worker</span> periodic checkpoint creation</li>
-          <li style="padding: 4px 0;"><span class="pill blue">Transcript Dehydrator</span> session log → memory chunks</li>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill blue">Path Watcher</span> inotify monitoring</li>
+          <li style="padding: 3px 0;"><span class="pill blue">Heartbeat</span> periodic checkpoints</li>
+          <li style="padding: 3px 0;"><span class="pill blue">Dehydrator</span> transcript → chunks</li>
+          <li style="padding: 3px 0;"><span class="pill blue">Checkpoint DB</span> crash recovery</li>
         </ul>
       </div>
-      <div class="card span-4">
+      <div class="card span-3">
+        <h2>⚙️ Processing</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill green">Chunker</span> semantic splitting</li>
+          <li style="padding: 3px 0;"><span class="pill green">Judge</span> LLM relevance scoring</li>
+          <li style="padding: 3px 0;"><span class="pill green">Field Extractor</span> entity/prop/value</li>
+          <li style="padding: 3px 0;"><span class="pill green">Router</span> inbox → active/discard</li>
+          <li style="padding: 3px 0;"><span class="pill green">Promoter</span> pending → active</li>
+          <li style="padding: 3px 0;"><span class="pill green">Demoter</span> low-utility cleanup</li>
+        </ul>
+      </div>
+      <div class="card span-3">
         <h2>💾 Storage</h2>
-        <ul style="list-style: none; padding: 0;">
-          <li style="padding: 4px 0;"><span class="pill purple">PostgreSQL</span> 18,686 items + pgvector + FTS</li>
-          <li style="padding: 4px 0;"><span class="pill purple">Qdrant</span> 2 collections (memory + code)</li>
-          <li style="padding: 4px 0;"><span class="pill purple">Neo4j</span> knowledge graph + code graph</li>
-        </ul>
-      </div>
-      <div class="card span-4">
-        <h2>🔍 Retrieval</h2>
-        <ul style="list-style: none; padding: 0;">
-          <li style="padding: 4px 0;"><span class="pill yellow">Hybrid Search</span> vector + FTS + Qdrant fusion</li>
-          <li style="padding: 4px 0;"><span class="pill yellow">Context Hydrator</span> unified code+memory+graph</li>
-          <li style="padding: 4px 0;"><span class="pill yellow">Cross-Encoder</span> reranking for precision</li>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill purple">PostgreSQL</span> 18,686 items + pgvector + FTS</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Qdrant</span> 2 collections · HNSW</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Neo4j</span> 1,308 nodes · 2,686 rels</li>
         </ul>
       </div>
     </div>
 
     <div class="grid">
-      <div class="card span-6">
-        <h2>🔗 Zero-Reread Code Engine</h2>
-        <p style="color: var(--text-1);">
-          8-slice architecture: AST parsing (Python + C++ via tree-sitter) → embedding into Qdrant →
-          Neo4j graph (IMPORTS, CALLS, DEFINES, HAS_METHOD, ABOUT_CODE) → context hydration with
-          token-optimized output. File watcher integration for live updates in ~5s.
-        </p>
+      <div class="card span-3">
+        <h2>🧬 Embedding</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill cyan">Memory Embedder</span> MiniLM 384d</li>
+          <li style="padding: 3px 0;"><span class="pill cyan">Code Embedder</span> same model, code collection</li>
+        </ul>
       </div>
-      <div class="card span-6">
-        <h2>🎮 70-Level Orchestrator</h2>
-        <p style="color: var(--text-1);">
-          Enterprise game studio pipeline: Conductor (10-phase governor) → multi-model execution bridge
-          (Opus/GPT/Gemini) → UE5 code generation → art generation (gpt-image-1) → QA automation →
-          platform certification → LiveOps → economy simulation → legal compliance. 4,300+ tests.
-        </p>
+      <div class="card span-3">
+        <h2>🔗 Code Engine</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill cyan">AST Parser</span> Python + C++ (tree-sitter)</li>
+          <li style="padding: 3px 0;"><span class="pill cyan">Graph Sync</span> Neo4j population</li>
+          <li style="padding: 3px 0;"><span class="pill cyan">Reconciliation</span> hash-based auto-repair</li>
+          <li style="padding: 3px 0;"><span class="pill cyan">File Hook</span> live updates ~5s</li>
+          <li style="padding: 3px 0;"><span class="pill cyan">ABOUT_CODE</span> 46 memory↔code edges</li>
+        </ul>
+      </div>
+      <div class="card span-3">
+        <h2>🔍 Retrieval</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill yellow">Hybrid Search</span> pgvector + FTS + RRF</li>
+          <li style="padding: 3px 0;"><span class="pill yellow">Qdrant Search</span> ANN vector</li>
+          <li style="padding: 3px 0;"><span class="pill yellow">Context Hydrator</span> unified retrieval</li>
+          <li style="padding: 3px 0;"><span class="pill yellow">Reranker</span> cross-encoder, 71ms</li>
+          <li style="padding: 3px 0;"><span class="pill yellow">Feedback</span> query-type learning</li>
+        </ul>
+      </div>
+      <div class="card span-3">
+        <h2>🎮 Orchestrator</h2>
+        <ul style="list-style: none; padding: 0; font-size: 12px;">
+          <li style="padding: 3px 0;"><span class="pill purple">Conductor V2</span> 10-phase governor</li>
+          <li style="padding: 3px 0;"><span class="pill purple">State Machine</span> work item lifecycle</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Multi-Model</span> Opus/GPT/Gemini</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Art Pipeline</span> gpt-image-1</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Economy Sim</span> 100K Monte Carlo</li>
+          <li style="padding: 3px 0;"><span class="pill purple">Legal</span> ESRB/PEGI/COPPA</li>
+        </ul>
       </div>
     </div>
 
@@ -709,19 +860,63 @@ flowchart TB
         theme: 'dark',
         themeVariables: {
           darkMode: true,
-          background: '#0a0e17',
+          background: '#060a12',
           primaryColor: '#1e3a5f',
           primaryTextColor: '#f1f5f9',
-          lineColor: '#64748b',
-          fontSize: '13px',
+          lineColor: '#475569',
+          fontSize: '12px',
         },
         flowchart: {
           htmlLabels: true,
           curve: 'basis',
-          useMaxWidth: true,
-          padding: 12,
+          useMaxWidth: false,
+          padding: 15,
+          nodeSpacing: 30,
+          rankSpacing: 50,
         },
       });
+
+      // Pan + zoom
+      const container = document.getElementById('arch-container');
+      const inner = document.getElementById('arch-inner');
+      const label = document.getElementById('zoom-label');
+      let scale = 0.55, tx = 0, ty = 0, dragging = false, sx, sy;
+
+      function apply() {
+        inner.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+        label.textContent = Math.round(scale * 100) + '%';
+      }
+      apply();
+
+      container.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect = container.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const oldScale = scale;
+        scale *= e.deltaY < 0 ? 1.1 : 0.9;
+        scale = Math.max(0.15, Math.min(3, scale));
+        tx = mx - (mx - tx) * scale / oldScale;
+        ty = my - (my - ty) * scale / oldScale;
+        apply();
+      }, { passive: false });
+
+      container.addEventListener('mousedown', e => { dragging = true; sx = e.clientX - tx; sy = e.clientY - ty; });
+      window.addEventListener('mousemove', e => { if (dragging) { tx = e.clientX - sx; ty = e.clientY - sy; apply(); } });
+      window.addEventListener('mouseup', () => { dragging = false; });
+
+      document.getElementById('zoom-in').onclick = () => { scale = Math.min(3, scale * 1.2); apply(); };
+      document.getElementById('zoom-out').onclick = () => { scale = Math.max(0.15, scale / 1.2); apply(); };
+      document.getElementById('zoom-fit').onclick = () => {
+        const svg = inner.querySelector('svg');
+        if (svg) {
+          const cw = container.clientWidth, ch = container.clientHeight;
+          const sw = svg.getBBox().width || inner.scrollWidth, sh = svg.getBBox().height || inner.scrollHeight;
+          scale = Math.min(cw / (sw + 40), ch / (sh + 40), 1);
+          tx = (cw - sw * scale) / 2;
+          ty = (ch - sh * scale) / 2;
+          apply();
+        }
+      };
     </script>
 
     {% endif %}
