@@ -1,3 +1,8 @@
+"""
+Display demotion candidates from the memory system for inspection and debugging.
+
+Key functions: feedback_counts, preview, main
+"""
 import sys
 from collections import Counter
 from pathlib import Path

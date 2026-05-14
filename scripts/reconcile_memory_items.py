@@ -1,3 +1,7 @@
+"""
+Reconcile memory items between sources — detect and resolve conflicts
+between file-based and database-stored memory.
+"""
 import json
 import argparse
 import subprocess

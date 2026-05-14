@@ -1,3 +1,8 @@
+"""
+Memory system utility: write memory item.
+
+Key functions: load_json, json_safe, target_file_for_item, write_temp_item
+"""
 import json
 import argparse
 import subprocess

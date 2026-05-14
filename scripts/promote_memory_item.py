@@ -1,3 +1,8 @@
+"""
+Promote memory item in the memory lifecycle.
+
+Key functions: now_iso, append_log, key_of, target_file_for_item
+"""
 import argparse
 import json
 import sys

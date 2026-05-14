@@ -1,3 +1,4 @@
+"""BGE/FlagEmbedding-based reranking for retrieval candidates."""
 import argparse
 from FlagEmbedding import FlagReranker
 

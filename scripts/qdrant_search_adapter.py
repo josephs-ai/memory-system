@@ -1,3 +1,4 @@
+"""Adapter bridging Qdrant vector search into the memory retrieval pipeline."""
 from __future__ import annotations
 
 import json

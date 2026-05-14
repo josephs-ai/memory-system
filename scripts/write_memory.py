@@ -1,10 +1,15 @@
+"""
+Memory system utility: write memory.
+
+Key functions: today_file, resolve_target, normalize_text, target_contains_text
+"""
 import os
 import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 VENV_PYTHON = WORKSPACE / ".memory-venv" / "bin" / "python"
 
 RECONCILE_SCRIPT = WORKSPACE / ".memory-index" / "scripts" / "reconcile_update.py"

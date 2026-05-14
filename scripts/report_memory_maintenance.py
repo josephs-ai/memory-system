@@ -1,3 +1,8 @@
+"""
+Generate report on memory maintenance.
+
+Key functions: parse_iso, age_days, same_slot, retrieval_stats
+"""
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path

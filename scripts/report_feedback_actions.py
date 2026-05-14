@@ -1,3 +1,8 @@
+"""
+Generate report on feedback actions.
+
+Key functions: build_status_map, feedback_rows, preview, main
+"""
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path

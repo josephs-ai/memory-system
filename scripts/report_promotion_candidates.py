@@ -1,3 +1,8 @@
+"""
+Generate report on promotion candidates.
+
+Key functions: norm, fetch_queue_payloads, canonical_key_exists, preview_item
+"""
 import argparse
 import json
 import sys

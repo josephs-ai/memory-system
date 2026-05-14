@@ -1,3 +1,7 @@
+"""
+Adapter bridging Neo4j graph queries into the memory retrieval pipeline.
+Provides code context expansion via graph traversal.
+"""
 from __future__ import annotations
 
 import json
@@ -10,20 +14,34 @@ PY = Path.home() / ".openclaw" / "venvs" / "memory-db" / "bin" / "python"
 QUERY_NEO4J = SCRIPTS_DIR / "query_neo4j.py"
 
 
-def search_graph_text(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    """
-    Thin adapter around the existing CLI-based query_neo4j.py.
-    This preserves the core Neo4j component instead of deleting it.
-    """
+def search_graph_text(
+    query: str,
+    limit: int = 10,
+    *,
+    project_id: str | None = None,
+    subproject_id: str | None = None,
+    workflow_id: str | None = None,
+    pipeline_id: str | None = None,
+) -> list[dict[str, Any]]:
+    cmd = [
+        str(PY),
+        str(QUERY_NEO4J),
+        "--query",
+        query,
+        "--limit",
+        str(limit),
+    ]
+    if project_id:
+        cmd += ["--project-id", project_id]
+    if subproject_id:
+        cmd += ["--subproject-id", subproject_id]
+    if workflow_id:
+        cmd += ["--workflow-id", workflow_id]
+    if pipeline_id:
+        cmd += ["--pipeline-id", pipeline_id]
+
     proc = subprocess.run(
-        [
-            str(PY),
-            str(QUERY_NEO4J),
-            "--query",
-            query,
-            "--limit",
-            str(limit),
-        ],
+        cmd,
         capture_output=True,
         text=True,
         cwd=str(SCRIPTS_DIR),
@@ -36,7 +54,7 @@ def search_graph_text(query: str, limit: int = 10) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
-        if not line:
+        if not line or line == "NONE":
             continue
         try:
             obj = json.loads(line)

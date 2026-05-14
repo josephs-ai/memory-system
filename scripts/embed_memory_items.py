@@ -1,3 +1,7 @@
+"""
+Generate sentence-transformer embeddings for memory items and store them
+in Qdrant for vector similarity search.
+"""
 import argparse
 import sys
 from pathlib import Path

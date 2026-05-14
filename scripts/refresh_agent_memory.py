@@ -1,3 +1,8 @@
+"""
+Memory system utility: refresh agent memory.
+
+Key functions: now_iso, load_state, file_mtime, tracked_event_files
+"""
 import argparse
 import json
 import sys
@@ -86,7 +91,7 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def latest_daily_file():
-    daily_dir = WORKSPACE / "memory" / "daily"
+    daily_dir = WORKSPACE / ".memory-index" / "timeline" / "daily"
     daily_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(daily_dir.glob("*.md"))
     if not files:

@@ -1,3 +1,8 @@
+"""
+Data migration: feedback and insights to db.
+
+Key functions: iter_jsonl, batched, migrate_feedback, parse_insight_line
+"""
 import json
 from pathlib import Path
 

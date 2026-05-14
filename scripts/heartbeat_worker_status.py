@@ -1,3 +1,8 @@
+"""
+Heartbeat subsystem: worker status management.
+
+Key functions: main
+"""
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""
+Data migration: review queues to db.
+
+Key functions: iter_jsonl, batched, migrate_one, main
+"""
 import json
 from pathlib import Path
 

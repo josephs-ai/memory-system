@@ -1,3 +1,7 @@
+"""
+Explainability tool — trace the origin and pipeline path of a memory item,
+showing how it was extracted, judged, and routed.
+"""
 import json
 import argparse
 import sys

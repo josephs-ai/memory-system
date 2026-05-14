@@ -1,3 +1,8 @@
+"""
+Memory system utility: patch memory file.
+
+Key functions: load_json, ensure_section, section_range, append_under_heading
+"""
 import json
 import argparse
 from pathlib import Path

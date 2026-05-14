@@ -1,3 +1,8 @@
+"""
+Generate report on semantic conflicts.
+
+Key functions: preview, looks_conflicting, fetch_candidate_pairs, main
+"""
 import sys
 from pathlib import Path
 

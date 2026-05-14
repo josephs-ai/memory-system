@@ -1,0 +1,39 @@
+{
+  "query": "How should I update the stealth suspicion decay behavior without breaking alert escalation?",
+  "agent_mode": "normal",
+  "project_id": "mygame_prototype",
+  "subproject_id": "enemy_ai",
+  "domain_tags": [
+    "combat",
+    "enemy_ai",
+    "stealth"
+  ],
+  "allowed_memory_types": [
+    "decision",
+    "decision_record",
+    "implementation_pattern",
+    "architecture_rule",
+    "guardrail",
+    "workflow_rule",
+    "bug_history",
+    "failure_mode",
+    "learned_fix",
+    "feature_summary"
+  ],
+  "allowed_lifecycle_states": [
+    "candidate",
+    "reinforced",
+    "durable"
+  ],
+  "max_context_items": 8,
+  "max_context_tokens": 1200,
+  "need_decisions": true,
+  "need_patterns": true,
+  "need_bug_history": true,
+  "need_recent_session_context": false,
+  "requester": {
+    "requester_id": "normal-agent-demo",
+    "requester_role": "normal_agent"
+  },
+  "retrieval_bias": "mixed"
+}

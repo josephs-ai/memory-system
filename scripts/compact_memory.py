@@ -1,7 +1,12 @@
+"""
+Memory system utility: compact memory.
+
+Key functions: read_lines
+"""
 import os
 from pathlib import Path
 
-WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace"))
+WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MEMORY = WORKSPACE / "memory"
 
 stable_files = [

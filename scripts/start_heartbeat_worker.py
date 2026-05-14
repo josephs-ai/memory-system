@@ -1,3 +1,8 @@
+"""
+Start the heartbeat worker service/daemon.
+
+Key functions: main
+"""
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""
+Memory system utility: archive memory.
+
+Key functions: main
+"""
 from pathlib import Path
 from datetime import datetime, timedelta
 import shutil

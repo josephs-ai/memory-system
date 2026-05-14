@@ -1,3 +1,8 @@
+"""
+Search and retrieve from runtime.
+
+Key functions: get_embed_model, get_rerank_model, collect_project_sources, simple_project_score
+"""
 from __future__ import annotations
 
 import math

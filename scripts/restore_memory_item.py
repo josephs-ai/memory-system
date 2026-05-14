@@ -1,3 +1,8 @@
+"""
+Restore memory item from archived/discarded state.
+
+Key functions: now_iso, json_safe, append_log, fetch_item_by_id
+"""
 import argparse
 import json
 import sys

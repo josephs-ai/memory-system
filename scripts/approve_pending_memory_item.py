@@ -1,3 +1,8 @@
+"""
+Approve pending memory item for promotion to durable status.
+
+Key functions: now_iso, append_log, main
+"""
 import argparse
 import json
 import sys

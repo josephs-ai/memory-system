@@ -1,3 +1,8 @@
+"""
+Checkpoint all agents state for crash recovery.
+
+Key functions: find_latest_session_for_agent, list_agents_with_sessions, main
+"""
 import json
 import subprocess
 from pathlib import Path

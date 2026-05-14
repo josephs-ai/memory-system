@@ -1,3 +1,8 @@
+"""
+Memory system utility: check agent memory policy.
+
+Key functions: load_json, main
+"""
 import json
 import argparse
 from pathlib import Path
@@ -37,7 +42,9 @@ def main():
         print("DISCARD scope_not_allowed")
         return
 
-    if confidence >= min_auto:
+    explicit_authority = str(item.get("authority_basis") or "").strip().lower() in {"user_explicit", "developer_explicit", "tester_explicit", "system_tool_verified"}
+    explicit_approval = bool(item.get("approved_by") or item.get("approval_source"))
+    if confidence >= min_auto and (explicit_authority and (explicit_approval or str(item.get("authority_basis") or "").strip().lower() == "system_tool_verified")):
         print("AUTO")
         return
 

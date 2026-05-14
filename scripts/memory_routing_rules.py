@@ -1,3 +1,10 @@
+"""
+Routing rules engine that determines how memory candidates are classified,
+scoped, and directed through the memory pipeline.
+"""
+from memory_promotion_gate import explicit_promotion_gate
+
+
 def stable_safe_auto(item: dict) -> bool:
     confidence = float(item.get("confidence", 0.0) or 0.0)
     importance = float(item.get("importance", item.get("retention_priority", 0.0)) or 0.0)
@@ -6,14 +13,16 @@ def stable_safe_auto(item: dict) -> bool:
     entity = (item.get("entity") or "").strip()
     prop = (item.get("property") or "").strip()
     value = (item.get("value") or "").strip()
-    text = (item.get("text") or "").strip()
-    memory_type = (item.get("memory_type") or "").strip().lower()
+    text = (item.get("text") or item.get("normalized_text") or item.get("claim_text") or "").strip()
+    memory_type = (item.get("memory_type") or item.get("claim_type") or "").strip().lower()
 
     has_full_structure = bool(entity and prop and value)
     looks_atomic = bool(text) and len(text.split()) <= 30
+    explicit_gate_ok, _ = explicit_promotion_gate(item)
 
     return (
-        str(scope).strip().lower() not in {"session", "transient", "ephemeral"}
+        explicit_gate_ok
+        and str(scope).strip().lower() not in {"session", "transient", "ephemeral"}
         and confidence >= 0.93
         and importance >= 0.90
         and has_full_structure

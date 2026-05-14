@@ -1,3 +1,7 @@
+"""
+Access control policies for memory retrieval — determines which agents
+can read which scoped memories based on role and project membership.
+"""
 from pathlib import Path
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"

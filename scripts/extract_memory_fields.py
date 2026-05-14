@@ -1,3 +1,8 @@
+"""
+Extract memory fields from source data.
+
+Key functions: extract_fields, main
+"""
 import json
 import argparse
 

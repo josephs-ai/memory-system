@@ -1,3 +1,8 @@
+"""
+Reconcile Update — utility for the OpenClaw memory system.
+
+Key functions: normalize_text, read_bullets, cosine, specificity_score
+"""
 import argparse
 import re
 import numpy as np

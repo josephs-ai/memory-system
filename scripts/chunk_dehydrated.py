@@ -1,3 +1,8 @@
+"""
+Chunk Dehydrated — utility for the OpenClaw memory system.
+
+Key functions: parse_pairs, group_pairs, render_group, main
+"""
 import argparse
 from pathlib import Path
 

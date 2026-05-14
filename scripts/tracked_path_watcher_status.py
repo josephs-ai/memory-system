@@ -1,3 +1,8 @@
+"""
+Tracked Path Watcher Status — utility for the OpenClaw memory system.
+
+Key functions: read_pid, log_stats, ts_to_iso, age_seconds
+"""
 from __future__ import annotations
 
 import json

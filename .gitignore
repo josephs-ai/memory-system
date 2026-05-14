@@ -17,9 +17,20 @@ build/
 # Runtime state
 embeddings/
 chunks/
-dehydrated/chunks_runtime/
+dehydrated/
 runtime/
 logs/
+timeline/
+
+# Development reports (keep locally, not in repo)
+REPORT_*.md
+GAMEDEV_SPEC.md
+
+# Legacy / migration artifacts
+legacy/
+
+# Orchestrator (separate repo)
+orchestrator/
 
 # Virtual envs
 venv/

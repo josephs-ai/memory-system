@@ -1,3 +1,8 @@
+"""
+Promote global insight in the memory lifecycle.
+
+Key functions: now_iso, append_log, append_if_new, main
+"""
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path

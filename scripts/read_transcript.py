@@ -1,3 +1,8 @@
+"""
+Read Transcript — utility for the OpenClaw memory system.
+
+Key functions: find_latest_session_for_agent, list_latest_sessions_all_agents, find_latest_session_for_agent, read_events
+"""
 import json
 import argparse
 from pathlib import Path

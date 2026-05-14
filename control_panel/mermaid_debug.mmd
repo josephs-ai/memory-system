@@ -1,0 +1,165 @@
+flowchart TB
+classDef source fill:#15243d,stroke:#6ea8fe,color:#edf2ff,stroke-width:2px;
+classDef policy fill:#1f2940,stroke:#8cb4ff,color:#edf2ff,stroke-width:2px;
+classDef pipeline fill:#1c2a35,stroke:#4dd4ac,color:#edf2ff,stroke-width:2px;
+classDef queue fill:#2f2a1c,stroke:#ffd166,color:#edf2ff,stroke-width:2px;
+classDef database fill:#271d35,stroke:#c084fc,color:#edf2ff,stroke-width:2px;
+classDef tensor fill:#183535,stroke:#2dd4bf,color:#edf2ff,stroke-width:2px;
+classDef project fill:#2b2233,stroke:#fb7185,color:#edf2ff,stroke-width:2px;
+classDef inventory fill:#2b2233,stroke:#fb7185,color:#edf2ff,stroke-width:2px;
+classDef component fill:#162642,stroke:#6ea8fe,color:#edf2ff,stroke-width:2px;
+subgraph retrieval_canonical["Retrieval System (Canonical)"]
+direction LR
+    search_core["Search Runtime Core<br/>search_runtime.py"]
+    search_interfaces["Search Interfaces<br/>CLI, Service, RBAC Wrappers"]
+    search_interfaces -->|calls core| search_core
+end
+subgraph watchdog["Watchdog System"]
+direction LR
+    path_watcher["Tracked Path Watcher<br/>tracked_path_watcher.py"]
+end
+subgraph save_memory["Save Memory System"]
+direction LR
+    write_runtime["Checkpoint Write Runtime<br/>checkpoint_write_runtime.py"]
+    write_interfaces["Write Interfaces<br/>CLI Wrappers"]
+    project_scaffold["Project Scaffold<br/>create_project_scaffold.py"]
+    trigger_cycles["Trigger Cycles<br/>run_pipeline_runtime.py"]
+    write_interfaces -->|calls core| write_runtime
+end
+subgraph control["Control + Heartbeat Tree"]
+direction LR
+    ui["Control Panel / Dashboard<br/>web UI, commands, agents, projects, architecture explorer"]
+    heartbeat_global["Global Heartbeat Policy<br/>HEARTBEAT.md + global cadence / mode rules"]
+    heartbeat_agents["Agent Heartbeat / Role Rules<br/>HEARTBEAT_AGENTS.md + policy enforcement"]
+    ui -->|configure| heartbeat_global
+    heartbeat_global -->|specialize| heartbeat_agents
+end
+subgraph ingest["Ingest + Dehydrate Tree"]
+direction LR
+    transcript_sources["Transcript / Session Sources<br/>raw session text, agent output, workspace state"]
+    dehydrate["Dehydrate Transcript<br/>strip noise, normalize transcript structure"]
+    chunking["Chunk + Update Extraction<br/>topic chunking and change extraction"]
+    filter_judge["Filter + Judge Candidates<br/>field extraction, scope, confidence, route hint"]
+    transcript_sources -->|clean| dehydrate
+    dehydrate -->|chunk| chunking
+    chunking -->|judge| filter_judge
+end
+subgraph routing["Routing + Review Tree"]
+direction LR
+    route_single["Single / Batch Routing<br/>route to inbox, discarded, pending stable, auto"]
+    queue_inbox["memory_inbox<br/>review queue"]
+    queue_pending["memory_pending_stable<br/>approval gate for strong stable memory"]
+    queue_discarded["memory_discarded<br/>discard history and reject cache"]
+    approval_ops["Approval / Lifecycle Ops<br/>approve, reject, promote, demote, restore, auto-process"]
+    route_single -->|review| queue_inbox
+    route_single -->|stable gate| queue_pending
+    route_single -->|reject| queue_discarded
+    queue_pending -->|approve/reject| approval_ops
+    queue_inbox -->|promote/demote| approval_ops
+end
+subgraph canonical["Canonical Registry Tree"]
+direction LR
+    registry_write["Canonical Write Path<br/>select best, reconcile, patch, and write canonical memory"]
+    registry_db_api["memory_db.py<br/>DB API for items, queues, feedback, embeddings, search"]
+    memory_items_table["memory_items<br/>canonical active / superseded / archived / uncertain rows"]
+    markdown_sync["Markdown Sync + Human Files<br/>sync registry back to readable memory markdown"]
+    registry_write -->|upsert| registry_db_api
+    registry_db_api -->|store| memory_items_table
+    memory_items_table -->|sync| markdown_sync
+end
+subgraph retrieval["Retrieval + Tensor Tree"]
+direction LR
+    embedding_path["Tensor / Embedding Path<br/>Sentence-Transformers all-MiniLM-L6-v2 encoding"]
+    embeddings_table["memory_item_embeddings<br/>vector table for pgvector-backed similarity search"]
+    hybrid_search["Hybrid Search Layer<br/>FTS + vector score + structured bonuses + RBAC"]
+    retrieval_feedback_table["retrieval_feedback<br/>useful/bad operator judgments for ranking adaptation"]
+    feedback_loop["Retrieval Feedback Loop<br/>mark useful/bad, adjust ranking, inspect low utility"]
+    embedding_path -->|embed| embeddings_table
+    embeddings_table -->|vector rank| hybrid_search
+    hybrid_search -->|log outcome| retrieval_feedback_table
+    retrieval_feedback_table -->|feedback| feedback_loop
+    feedback_loop -->|tune rank| hybrid_search
+end
+subgraph ops["Inspection + Migration Tree"]
+direction LR
+    maintenance["Maintenance / Report Surface<br/>queue, maintenance, conflicts, recent writes, promotion views"]
+    migrations["Migration / Backfill Utilities<br/>legacy JSONL to DB and feedback migration"]
+    projects["Project File Memory<br/>current.md, milestones, daily notes, tracked project files"]
+    inventory["Full Script Inventory<br/>all scripts in .memory-index/scripts grouped automatically"]
+    maintenance -->|backfill| migrations
+    maintenance -->|inspect| projects
+    maintenance -->|catalog| inventory
+end
+ui -. monitor .-> transcript_sources
+heartbeat_agents -. policy ceiling .-> filter_judge
+filter_judge -. judge output .-> route_single
+approval_ops -. approved write .-> registry_write
+memory_items_table -. retrieve .-> hybrid_search
+memory_items_table -. embed source .-> embedding_path
+projects -. file search .-> hybrid_search
+hybrid_search -. report .-> maintenance
+memory_items_table -. inspect .-> maintenance
+class search_core component;
+class search_interfaces pipeline;
+class path_watcher pipeline;
+class write_runtime component;
+class write_interfaces pipeline;
+class project_scaffold project;
+class trigger_cycles pipeline;
+class ui component;
+class heartbeat_global policy;
+class heartbeat_agents policy;
+class transcript_sources source;
+class dehydrate pipeline;
+class chunking pipeline;
+class filter_judge pipeline;
+class route_single pipeline;
+class queue_inbox queue;
+class queue_pending queue;
+class queue_discarded queue;
+class approval_ops pipeline;
+class registry_write pipeline;
+class registry_db_api database;
+class memory_items_table database;
+class markdown_sync pipeline;
+class embedding_path tensor;
+class embeddings_table tensor;
+class hybrid_search pipeline;
+class retrieval_feedback_table database;
+class feedback_loop pipeline;
+class maintenance pipeline;
+class migrations pipeline;
+class projects project;
+class inventory inventory;
+click search_core "/architecture/node/search_core"
+click search_interfaces "/architecture/node/search_interfaces"
+click path_watcher "/architecture/node/path_watcher"
+click write_runtime "/architecture/node/write_runtime"
+click write_interfaces "/architecture/node/write_interfaces"
+click project_scaffold "/architecture/node/project_scaffold"
+click trigger_cycles "/architecture/node/trigger_cycles"
+click ui "/architecture/node/ui"
+click heartbeat_global "/architecture/node/heartbeat_global"
+click heartbeat_agents "/architecture/node/heartbeat_agents"
+click transcript_sources "/architecture/node/transcript_sources"
+click dehydrate "/architecture/node/dehydrate"
+click chunking "/architecture/node/chunking"
+click filter_judge "/architecture/node/filter_judge"
+click route_single "/architecture/node/route_single"
+click queue_inbox "/architecture/node/queue_inbox"
+click queue_pending "/architecture/node/queue_pending"
+click queue_discarded "/architecture/node/queue_discarded"
+click approval_ops "/architecture/node/approval_ops"
+click registry_write "/architecture/node/registry_write"
+click registry_db_api "/architecture/node/registry_db_api"
+click memory_items_table "/architecture/node/memory_items_table"
+click markdown_sync "/architecture/node/markdown_sync"
+click embedding_path "/architecture/node/embedding_path"
+click embeddings_table "/architecture/node/embeddings_table"
+click hybrid_search "/architecture/node/hybrid_search"
+click retrieval_feedback_table "/architecture/node/retrieval_feedback_table"
+click feedback_loop "/architecture/node/feedback_loop"
+click maintenance "/architecture/node/maintenance"
+click migrations "/architecture/node/migrations"
+click projects "/architecture/node/projects"
+click inventory "/architecture/node/inventory"

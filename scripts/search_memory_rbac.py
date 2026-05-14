@@ -1,3 +1,7 @@
+"""
+Role-based access control layer for memory search.
+Wraps search_memory with permission checking.
+"""
 import argparse
 import json
 import sys

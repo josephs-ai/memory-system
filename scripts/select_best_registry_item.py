@@ -1,3 +1,8 @@
+"""
+Select the best registry item using scoring heuristics.
+
+Key functions: json_safe, score_match, state_bonus, confidence_bonus
+"""
 import json
 import argparse
 import subprocess

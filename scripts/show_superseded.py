@@ -1,3 +1,8 @@
+"""
+Display superseded from the memory system for inspection and debugging.
+
+Key functions: preview, main
+"""
 import argparse
 import sys
 from pathlib import Path

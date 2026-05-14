@@ -1,3 +1,8 @@
+"""
+Memory system utility: match memory items.
+
+Key functions: load_json, norm, same, present
+"""
 import json
 import argparse
 from pathlib import Path

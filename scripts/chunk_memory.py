@@ -1,3 +1,8 @@
+"""
+Memory system utility: chunk memory.
+
+Key functions: split_words, chunk_text, detect_heading
+"""
 import os
 import re
 import json
@@ -6,7 +11,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-CONFIG_PATH = os.path.expanduser("~/.openclaw/workspace/.memory-index/config.json")
+CONFIG_PATH = os.environ.get("OPENCLAW_MEMORY_CONFIG", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"))
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)

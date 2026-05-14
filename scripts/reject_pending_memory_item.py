@@ -1,3 +1,8 @@
+"""
+Reject pending memory item from the promotion queue.
+
+Key functions: now_iso, append_log, main
+"""
 import argparse
 import json
 import sys

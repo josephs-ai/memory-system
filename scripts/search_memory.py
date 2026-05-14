@@ -1,3 +1,8 @@
+"""
+Core hybrid search engine combining full-text search (PostgreSQL ts_rank),
+vector similarity (Qdrant), cross-encoder reranking, feedback scoring,
+and temporal reasoning into a unified retrieval pipeline.
+"""
 from typing import Any
 import os
 import httpx

@@ -1,3 +1,8 @@
+"""
+Heartbeat subsystem: manager common management.
+
+Key functions: ensure_runtime_dir, load_env_file, build_runtime_env, atomic_write_text
+"""
 from __future__ import annotations
 
 import json
@@ -44,7 +49,7 @@ def build_runtime_env() -> dict[str, str]:
     for key, value in file_env.items():
         env.setdefault(key, value)
 
-    env.setdefault("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=joseph-ding")
+    env.setdefault("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
     env.setdefault("OPENCLAW_NEO4J_PASSWORD", "neo4jpassword")
     return env
 

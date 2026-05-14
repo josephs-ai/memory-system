@@ -1,3 +1,8 @@
+"""
+Search and retrieve from service status.
+
+Key functions: read_json, pid_alive, proc_matches_service, proc_start_time
+"""
 from __future__ import annotations
 
 import json

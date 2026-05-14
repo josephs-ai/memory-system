@@ -1,3 +1,4 @@
+"""Memory system utility: retrieve memory."""
 import os
 import json
 import sqlite3
@@ -6,7 +7,7 @@ import numpy as np
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 
-CONFIG_PATH = os.path.expanduser("~/.openclaw/workspace/.memory-index/config.json")
+CONFIG_PATH = os.environ.get("OPENCLAW_MEMORY_CONFIG", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"))
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)

@@ -1,3 +1,8 @@
+"""
+Memory system utility: process auto memory items.
+
+Key functions: now_iso, append_log, fetch_auto_items, clear_auto_flag
+"""
 import json
 import subprocess
 import sys

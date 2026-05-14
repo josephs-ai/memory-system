@@ -1,3 +1,8 @@
+"""
+Stop the tracked path watcher service/daemon.
+
+Key functions: read_pid, cleanup, main
+"""
 from __future__ import annotations
 
 import json

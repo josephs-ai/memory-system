@@ -1,3 +1,8 @@
+"""
+Memory system utility: ingest workspace state memory.
+
+Key functions: load_json, existing_text, append_block_if_new, normalize_summary_line
+"""
 import argparse
 import json
 import sys

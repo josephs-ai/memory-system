@@ -1,9 +1,14 @@
+"""
+Batch routing of memory items through the routing rules engine.
+Processes multiple candidates in a single pass for efficiency.
+"""
 import json
 import argparse
 import subprocess
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
+from memory_promotion_gate import explicit_promotion_gate
 from memory_routing_rules import stable_safe_auto
 
 from memory_db import (
@@ -106,13 +111,15 @@ def decide_route(item: dict) -> tuple[str, str]:
     confidence = float(item.get("confidence", 0.0) or 0.0)
     importance = float(item.get("importance", 0.0) or 0.0)
     scope = item.get("scope", "stable")
-
+    explicit_gate_ok, explicit_gate_reasons = explicit_promotion_gate(item)
 
     if stable_safe_auto(item):
-        return "AUTO", "stable_safe_auto"
+        return "AUTO", "explicit_structural_auto"
 
     if scope == "stable" and confidence >= 0.90 and importance >= 0.90:
-        return "PENDING_STABLE", "stable_high_importance_requires_approval"
+        if explicit_gate_ok:
+            return "PENDING_STABLE", "stable_high_importance_explicit_gate"
+        return "INBOX", "stable_high_importance_missing_explicit_gate:" + ",".join(explicit_gate_reasons)
 
     policy_route, policy_reason = apply_agent_policy(item)
 

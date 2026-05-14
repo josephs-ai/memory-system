@@ -1,3 +1,8 @@
+"""
+Summarize Workspace Changes — utility for the OpenClaw memory system.
+
+Key functions: load_json, add_summary, classify_paths, main
+"""
 import argparse
 import json
 from pathlib import Path

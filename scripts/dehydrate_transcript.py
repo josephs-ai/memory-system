@@ -1,3 +1,7 @@
+"""
+Transcript dehydration — strip noise, tool calls, and low-value content
+from raw session transcripts to extract clean text for memory extraction.
+"""
 import json
 import argparse
 import re
@@ -33,6 +37,57 @@ MEMORY_SIGNAL_PATTERNS = [
     r"restricted in my specific tool policy",
     r"execute the `openclaw browser` cli commands",
     r"supports managing different profiles",
+    r"root cause",
+    r"implementation summary",
+    r"architectural",
+    r"files touched",
+    r"focused proof",
+    r"ready for tester",
+]
+
+DEV_LOOP_LABEL_PREFIXES = (
+    "loop_state:",
+    "decision:",
+    "next_role:",
+    "action_type:",
+    "reason:",
+    "bounded_goal:",
+    "must_address:",
+    "files_to_touch:",
+    "files_to_avoid:",
+    "reping:",
+    "reping_reason:",
+    "blocker:",
+    "escalate:",
+    "escalation_question:",
+    "done_when:",
+    "phase_complete:",
+    "expected_output:",
+    "likely_files_to_touch:",
+    "likely file:",
+)
+
+DEV_LOOP_NOISE_PATTERNS = [
+    r"agent-to-agent announce step",
+    r"^status:",
+    r"^supervisor (dispatch|routing|idle check|reping|handoff)",
+    r"^rightful next actor",
+    r"^you are the rightful next actor",
+    r"^tester packet:",
+    r"^builder packet:",
+    r"^please start ",
+    r"^ready\.?$",
+    r"^\[\[reply_to_current\]\]\s*ready\.?$",
+]
+
+PYTEST_NOISE_PATTERNS = [
+    r"^traceback \(most recent call last\):",
+    r"^assertionerror:",
+    r"^e\s+assert ",
+    r"^failed ",
+    r"^={3,}",
+    r"short test summary info",
+    r"where \d+ = len\(",
 ]
 
 def find_latest_session_for_agent(agent_name: str):
@@ -125,10 +180,41 @@ def strip_system_spam(text: str) -> str:
 
     return "\n".join(kept).strip()
 
+def strip_dev_loop_noise(text: str) -> str:
+    lines = text.splitlines()
+    kept = []
+    for line in lines:
+        s = line.strip()
+        sl = s.lower()
+
+        if not s:
+            continue
+        if any(sl.startswith(prefix) for prefix in DEV_LOOP_LABEL_PREFIXES):
+            continue
+        if any(re.search(p, sl) for p in DEV_LOOP_NOISE_PATTERNS):
+            continue
+        if any(re.search(p, sl) for p in PYTEST_NOISE_PATTERNS):
+            continue
+        if s.startswith("[non-text content:"):
+            continue
+        kept.append(line)
+
+    text = "\n".join(kept).strip()
+
+    if text:
+        tl = text.lower()
+        if any(re.search(p, tl) for p in DEV_LOOP_NOISE_PATTERNS):
+            return ""
+        if any(re.search(p, tl) for p in PYTEST_NOISE_PATTERNS):
+            return ""
+    return text
+
+
 def clean_user_text(text: str) -> str:
     text = strip_sender_wrapper(text)
     text = strip_system_spam(text)
     text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+    text = strip_dev_loop_noise(text)
     return text
 
 def extract_assistant_text(content_list):
@@ -144,6 +230,7 @@ def extract_assistant_text(content_list):
             txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL)
             txt = re.sub(r"</?final>", "", txt, flags=re.IGNORECASE)
             txt = txt.strip()
+            txt = strip_dev_loop_noise(txt)
             if txt:
                 texts.append(txt)
     return "\n".join(texts).strip()

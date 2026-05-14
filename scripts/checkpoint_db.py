@@ -1,3 +1,8 @@
+"""
+Checkpoint db state for crash recovery.
+
+Key functions: load_env_file, close_pool, ensure_checkpoint_tables, mark_stale_processing_checkpoints
+"""
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""
+Chunk By Topic — utility for the OpenClaw memory system.
+
+Key functions: clean_role_prefix, normalize_line, is_header, is_startup_instruction
+"""
 import re
 import argparse
 from pathlib import Path

@@ -1,3 +1,8 @@
+"""
+Apply Feedback Actions — utility for the OpenClaw memory system.
+
+Key functions: now_iso, append_log, main
+"""
 import sys
 from datetime import datetime, timezone
 from pathlib import Path

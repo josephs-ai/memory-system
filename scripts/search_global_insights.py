@@ -1,3 +1,8 @@
+"""
+Search and retrieve from global insights.
+
+Key functions: score_text, main
+"""
 import argparse
 from pathlib import Path
 

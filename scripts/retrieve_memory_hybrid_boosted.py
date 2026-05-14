@@ -1,8 +1,13 @@
+"""
+Memory system utility: retrieve memory hybrid boosted.
+
+Key functions: tok, boost
+"""
 import os, json, sqlite3, argparse, numpy as np, re
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 
-CONFIG_PATH = os.path.expanduser("~/.openclaw/workspace/.memory-index/config.json")
+CONFIG_PATH = os.environ.get("OPENCLAW_MEMORY_CONFIG", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"))
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 

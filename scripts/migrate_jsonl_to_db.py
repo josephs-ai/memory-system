@@ -1,3 +1,8 @@
+"""
+Data migration: jsonl to db.
+
+Key functions: iter_jsonl, batched, main
+"""
 import json
 from pathlib import Path
 

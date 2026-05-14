@@ -1,3 +1,7 @@
+"""
+Cross-encoder reranking using sentence-transformers for high-precision
+re-scoring of retrieval candidates.
+"""
 import argparse
 from sentence_transformers import CrossEncoder
 

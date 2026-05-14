@@ -1,3 +1,8 @@
+"""
+Display recent writes from the memory system for inspection and debugging.
+
+Key functions: parse_ts, preview, main
+"""
 import argparse
 import sys
 from datetime import datetime

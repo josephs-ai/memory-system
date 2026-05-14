@@ -1,3 +1,8 @@
+"""
+Ensure the tracked path watcher is running, starting it if needed.
+
+Key functions: watcher_enabled, run_json, status_ok, main
+"""
 from __future__ import annotations
 
 import json

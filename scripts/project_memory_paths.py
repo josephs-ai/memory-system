@@ -1,3 +1,7 @@
+"""
+Path resolution for project-scoped memory storage.
+Maps project IDs to filesystem locations.
+"""
 from datetime import datetime, timezone
 from pathlib import Path
 

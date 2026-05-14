@@ -1,3 +1,8 @@
+"""
+Extract active memory items from source data.
+
+Key functions: infer_fields, make_id, main
+"""
 import json
 import argparse
 import hashlib

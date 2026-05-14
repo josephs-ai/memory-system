@@ -1,3 +1,8 @@
+"""
+Select the best existing item using scoring heuristics.
+
+Key functions: load_json, score_match, main
+"""
 import json
 import argparse
 import subprocess

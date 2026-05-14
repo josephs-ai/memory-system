@@ -1,3 +1,7 @@
+"""
+Explainability tool — trace and explain why a specific memory item
+was retrieved for a given query, showing scoring breakdown.
+"""
 import json
 import argparse
 import subprocess

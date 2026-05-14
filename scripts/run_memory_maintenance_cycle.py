@@ -1,3 +1,7 @@
+"""
+Run periodic memory maintenance — compaction, reconciliation, embedding
+backfills, and health checks.
+"""
 import argparse
 import json
 import subprocess

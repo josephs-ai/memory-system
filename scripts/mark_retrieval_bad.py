@@ -1,3 +1,8 @@
+"""
+Mark retrieval results as bad for the feedback loop.
+
+Key functions: now_iso, append_log, main
+"""
 import argparse
 import sys
 from datetime import datetime, timezone

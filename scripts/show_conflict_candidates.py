@@ -1,3 +1,8 @@
+"""
+Display conflict candidates from the memory system for inspection and debugging.
+
+Key functions: same_slot, preview, main
+"""
 import sys
 from pathlib import Path
 

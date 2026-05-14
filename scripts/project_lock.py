@@ -1,3 +1,7 @@
+"""
+Distributed locking for project-scoped memory operations.
+Prevents concurrent pipeline runs from corrupting shared state.
+"""
 import os
 import json
 import time

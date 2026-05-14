@@ -1,3 +1,7 @@
+"""
+Contract/interface definitions for memory retrieval —
+defines expected inputs, outputs, and guarantees of the search pipeline.
+"""
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from memory_routing_models import WorkItemMemoryMetadata, MemoryScopeLevel

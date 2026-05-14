@@ -1,3 +1,8 @@
+"""
+Heartbeat subsystem: refresh agent memory management.
+
+Key functions: main
+"""
 import argparse
 import subprocess
 from pathlib import Path

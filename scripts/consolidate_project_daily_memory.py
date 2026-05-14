@@ -1,3 +1,8 @@
+"""
+Memory system utility: consolidate project daily memory.
+
+Key functions: load_text, collect_bullets, normalize_topic, unique_preserve_order
+"""
 import argparse
 from collections import Counter
 from pathlib import Path

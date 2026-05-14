@@ -1,3 +1,8 @@
+"""
+Synchronize memory to neo4j.
+
+Key functions: main
+"""
 from __future__ import annotations
 
 import sys

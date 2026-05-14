@@ -1,3 +1,7 @@
+"""
+Run the complete memory pipeline end-to-end — dehydrate, chunk, extract,
+judge, route, embed, and reconcile in a single pass.
+"""
 import argparse
 import subprocess
 from pathlib import Path

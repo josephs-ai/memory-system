@@ -1,3 +1,8 @@
+"""
+Start the search service service/daemon.
+
+Key functions: atomic_write, pid_alive, proc_matches_service, port_in_use
+"""
 from __future__ import annotations
 
 import psutil

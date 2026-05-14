@@ -1,3 +1,8 @@
+"""
+Demote memory item in the memory lifecycle.
+
+Key functions: now_iso, append_log, fetch_item_by_id, demote_item
+"""
 import argparse
 import json
 import sys

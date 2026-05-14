@@ -1,3 +1,7 @@
+"""
+CI smoke test runner — quick validation that core imports and basic
+operations work correctly.
+"""
 from __future__ import annotations
 
 import importlib

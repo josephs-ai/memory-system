@@ -1,3 +1,8 @@
+"""
+Auto Promote Safe Items — utility for the OpenClaw memory system.
+
+Key functions: now_iso, append_log, identity_key, target_file_for_item
+"""
 import sys
 from pathlib import Path
 from datetime import datetime, timezone

@@ -1,3 +1,4 @@
+"""Capture a point-in-time snapshot of workspace state for memory context."""
 import argparse
 import json
 import subprocess

@@ -1,3 +1,8 @@
+"""
+Display low utility retrievals from the memory system for inspection and debugging.
+
+Key functions: main
+"""
 import argparse
 import sys
 from pathlib import Path

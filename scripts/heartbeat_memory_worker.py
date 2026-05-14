@@ -1,3 +1,7 @@
+"""
+Background worker that periodically runs memory pipeline tasks —
+checkpointing, embedding, reconciliation, and maintenance cycles.
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,8 @@
+"""
+Create memory restore point.
+
+Key functions: now_stamp, copy_if_exists, main
+"""
 import argparse
 import shutil
 from datetime import datetime, timezone

@@ -1,3 +1,8 @@
+"""
+Ensure the heartbeat worker is running, starting it if needed.
+
+Key functions: heartbeat_enabled, run_json, main
+"""
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""
+Display promotion candidates from the memory system for inspection and debugging.
+
+Key functions: fetch_queue_payloads, preview, main
+"""
 import sys
 from pathlib import Path
 

@@ -1,3 +1,8 @@
+"""
+Display review queue from the memory system for inspection and debugging.
+
+Key functions: fetch_queue_rows, preview_text, show_section, main
+"""
 import argparse
 import sys
 from pathlib import Path

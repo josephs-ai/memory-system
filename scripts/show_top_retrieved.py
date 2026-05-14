@@ -1,3 +1,8 @@
+"""
+Display top retrieved from the memory system for inspection and debugging.
+
+Key functions: feedback_counts, build_text_map, preview, main
+"""
 import argparse
 import sys
 from collections import Counter

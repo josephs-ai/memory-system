@@ -1,3 +1,8 @@
+"""
+Synchronize registry to markdown.
+
+Key functions: group_items, render_file, main
+"""
 import sys
 from collections import defaultdict
 from pathlib import Path

@@ -1,3 +1,7 @@
+"""
+Pydantic models for memory routing — defines schemas for routing decisions,
+scope assignments, and pipeline metadata.
+"""
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field

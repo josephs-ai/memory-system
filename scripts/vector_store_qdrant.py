@@ -1,3 +1,7 @@
+"""
+Qdrant vector store adapter for storing and searching embeddings.
+Handles collection management, upsert, and similarity search.
+"""
 from __future__ import annotations
 
 import os

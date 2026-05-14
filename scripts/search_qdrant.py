@@ -1,3 +1,8 @@
+"""
+Search and retrieve from qdrant.
+
+Key functions: main
+"""
 import argparse
 import sys
 from pathlib import Path

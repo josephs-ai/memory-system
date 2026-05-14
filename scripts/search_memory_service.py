@@ -1,3 +1,7 @@
+"""
+FastAPI-based HTTP search service exposing the memory retrieval pipeline.
+Provides /search, /context, and /health endpoints for external consumers.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +29,7 @@ from memory_db import search_memory_items_by_terms
 from graph_search_adapter import search_graph_text
 from memory_retrieval_contract import build_memory_pack
 from memory_routing_models import WorkItemMemoryMetadata
+from normal_agent_api import NormalAgentRequest, build_normal_agent_packet_response
 from orchestrator_context_core import fetch_orchestrator_context
 from qdrant_search_adapter import search_qdrant_text
 
@@ -438,10 +443,21 @@ async def orchestrator_context(req: OrchestratorContextRequest):
         )
 
         work_item = build_search_work_item_metadata(project_id, req.subproject_id)
+        selected_refs = []
+        for ref in raw.get("memory_refs", []):
+            ref_dict = dict(ref)
+            ref_dict["category"] = ref_dict.get("memory_type")
+            ref_dict["content"] = ref_dict.get("content")
+            for tag in ref_dict.get("tags", []) or []:
+                if isinstance(tag, str) and tag.startswith("target_role:"):
+                    ref_dict["target_role"] = tag.split(":", 1)[1]
+                    break
+            selected_refs.append(ref_dict)
+
         pack = build_memory_pack(
             role=req.role,
             work_item=work_item,
-            parent_refs=raw.get("selected_refs", []),
+            parent_refs=selected_refs,
             subproject_refs=[],
             project_refs=[],
         )
@@ -455,3 +471,14 @@ async def orchestrator_context(req: OrchestratorContextRequest):
     except Exception:
         LOGGER.exception("orchestrator_context_failed work_id=%r", req.work_id)
         raise HTTPException(status_code=500, detail="orchestrator_context_internal_error")
+
+
+@app.post("/normal-agent/packet")
+async def normal_agent_packet(req: NormalAgentRequest):
+    try:
+        rows, meta = await run_hot_search(app, req.query, req.max_context_items)
+        response = build_normal_agent_packet_response(req, rows, retrieval_meta=meta)
+        return response.model_dump()
+    except Exception:
+        LOGGER.exception("normal_agent_packet_failed project_id=%r query=%r", req.project_id, req.query)
+        raise HTTPException(status_code=500, detail="normal_agent_packet_internal_error")

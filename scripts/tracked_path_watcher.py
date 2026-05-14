@@ -1,3 +1,7 @@
+"""
+File system watcher using watchdog — monitors tracked paths for changes
+and triggers memory/code index updates on file modifications.
+"""
 from __future__ import annotations
 
 import argparse

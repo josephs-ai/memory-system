@@ -1,3 +1,8 @@
+"""
+Stop the search service service/daemon.
+
+Key functions: pid_alive, main
+"""
 from __future__ import annotations
 
 import json

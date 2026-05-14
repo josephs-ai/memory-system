@@ -1,3 +1,8 @@
+"""
+Heartbeat subsystem: tuning management.
+
+Key functions: compute_effective_interval
+"""
 from __future__ import annotations
 
 import sys

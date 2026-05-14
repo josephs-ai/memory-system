@@ -1,3 +1,7 @@
+"""
+Core context assembly for the orchestrator — retrieves and formats
+memory context for orchestrator decision-making.
+"""
 from __future__ import annotations
 
 import os
@@ -15,6 +19,7 @@ from orchestrator.memory_contract import (  # noqa: E402
     UNSCOPED_FALLBACK_SCOPE,
     contract_for_role,
     eligible_categories_for_role,
+    eligible_lifecycle_states_for_role,
     eligible_types_for_role,
     memory_category,
     preferred_types_for_role,
@@ -39,7 +44,7 @@ def _summarize_scope(rows: list[tuple], desired_types: tuple[str, ...], project_
     return None
 
 
-def _execute_scope_query(cur, scopes: list[str], eligible_types: list[str], limit: int) -> tuple[list[tuple], dict]:
+def _execute_scope_query(cur, scopes: list[str], eligible_types: list[str], eligible_lifecycle_states: list[str], limit: int) -> tuple[list[tuple], dict]:
     if not scopes:
         return [], {"query_mode": "skipped", "scope_column_present": None, "scope_filter_applied": False}
 
@@ -48,7 +53,7 @@ def _execute_scope_query(cur, scopes: list[str], eligible_types: list[str], limi
         FROM memory_items
         WHERE scope = ANY(%s)
           AND memory_type = ANY(%s)
-          AND lifecycle_state IN ('candidate', 'reinforced', 'durable')
+          AND lifecycle_state = ANY(%s)
           AND (retrieval_eligibility IS NULL OR retrieval_eligibility <> 'excluded')
         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
         LIMIT %s
@@ -57,14 +62,14 @@ def _execute_scope_query(cur, scopes: list[str], eligible_types: list[str], limi
         SELECT id, memory_type, lifecycle_state, text, tags, updated_at, created_at, work_id, %s AS scope
         FROM memory_items
         WHERE memory_type = ANY(%s)
-          AND lifecycle_state IN ('candidate', 'reinforced', 'durable')
+          AND lifecycle_state = ANY(%s)
           AND (retrieval_eligibility IS NULL OR retrieval_eligibility <> 'excluded')
         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
         LIMIT %s
     """
 
     try:
-        cur.execute(scoped_query, (scopes, eligible_types, limit))
+        cur.execute(scoped_query, (scopes, eligible_types, eligible_lifecycle_states, limit))
         return cur.fetchall(), {
             "query_mode": "scoped",
             "scope_column_present": True,
@@ -75,7 +80,7 @@ def _execute_scope_query(cur, scopes: list[str], eligible_types: list[str], limi
         if "scope" not in str(exc).lower():
             raise
 
-    cur.execute(unscoped_query, (UNSCOPED_FALLBACK_SCOPE, eligible_types, limit))
+    cur.execute(unscoped_query, (UNSCOPED_FALLBACK_SCOPE, eligible_types, eligible_lifecycle_states, limit))
     return cur.fetchall(), {
         "query_mode": "unscoped_fallback",
         "scope_column_present": False,
@@ -99,17 +104,18 @@ def fetch_orchestrator_context(
     _contract = contract_for_role(role)
     preferred_types = preferred_types_for_role(role)
     eligible_types = eligible_types_for_role(role)
+    eligible_lifecycle_states = eligible_lifecycle_states_for_role(role)
     primary_scopes, fallback_scopes = scope_plan(project_id, subproject_id)
     limit = max(1, min(limit, 12))
     candidate_limit = max(limit * 4, limit)
 
     with psycopg.connect(_get_dsn()) as conn:
         with conn.cursor() as cur:
-            primary_rows, primary_query_meta = _execute_scope_query(cur, primary_scopes, eligible_types, candidate_limit)
+            primary_rows, primary_query_meta = _execute_scope_query(cur, primary_scopes, eligible_types, eligible_lifecycle_states, candidate_limit)
             fallback_rows = []
             fallback_query_meta = {"query_mode": "skipped", "scope_column_present": primary_query_meta.get("scope_column_present")}
             if len(primary_rows) < limit and fallback_scopes and primary_query_meta.get("query_mode") != "unscoped_fallback":
-                fallback_rows, fallback_query_meta = _execute_scope_query(cur, fallback_scopes, eligible_types, candidate_limit)
+                fallback_rows, fallback_query_meta = _execute_scope_query(cur, fallback_scopes, eligible_types, eligible_lifecycle_states, candidate_limit)
 
     deduped_rows = []
     seen_ids: set[str] = set()
@@ -184,6 +190,7 @@ def fetch_orchestrator_context(
             "fallback_query_mode": fallback_query_meta.get("query_mode"),
             "eligible_categories": eligible_categories_for_role(role),
             "eligible_types": eligible_types,
+            "eligible_lifecycle_states": eligible_lifecycle_states,
             "primary_candidate_count": len(primary_rows),
             "fallback_candidate_count": len(fallback_rows),
         },

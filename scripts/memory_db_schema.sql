@@ -3,6 +3,15 @@ CREATE TABLE IF NOT EXISTS memory_items (
     text TEXT NOT NULL,
     memory_type TEXT,
     scope TEXT,
+    project_id TEXT,
+    subproject_id TEXT,
+    workflow_id TEXT,
+    pipeline_id TEXT,
+    context_scope_id TEXT,
+    context_scope_type TEXT,
+    context_scope_payload JSONB DEFAULT '{}'::jsonb,
+    inheritance_policy TEXT,
+    scope_confidence DOUBLE PRECISION,
     entity TEXT,
     property TEXT,
     value TEXT,
@@ -41,6 +50,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
 
 CREATE INDEX IF NOT EXISTS idx_memory_items_status ON memory_items(status);
 CREATE INDEX IF NOT EXISTS idx_memory_items_scope ON memory_items(scope);
+CREATE INDEX IF NOT EXISTS idx_memory_items_context_scope_id ON memory_items(context_scope_id);
 CREATE INDEX IF NOT EXISTS idx_memory_items_entity ON memory_items(entity);
 CREATE INDEX IF NOT EXISTS idx_memory_items_property ON memory_items(property);
 CREATE INDEX IF NOT EXISTS idx_memory_items_memory_type ON memory_items(memory_type);

@@ -1,3 +1,8 @@
+"""
+Memory system utility: route memory item.
+
+Key functions: now_iso, append_log, main
+"""
 import json
 import sys
 from datetime import datetime, timezone

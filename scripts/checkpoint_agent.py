@@ -1,3 +1,8 @@
+"""
+Checkpoint agent state for crash recovery.
+
+Key functions: find_latest_session_for_agent, run_capture, clear_old_chunks, main
+"""
 import json
 import argparse
 import subprocess
@@ -18,6 +23,8 @@ CHUNK_SCRIPT = SCRIPTS_DIR / "chunk_by_topic.py"
 EXTRACT_CHUNK_UPDATES_SCRIPT = SCRIPTS_DIR / "extract_chunk_updates.py"
 ROUTE_SCRIPT = SCRIPTS_DIR / "route_memory_items_batch.py"
 PROCESS_AUTO_SCRIPT = SCRIPTS_DIR / "process_auto_memory_items.py"
+TIMELINE_LEDGER_SCRIPT = SCRIPTS_DIR / "timeline_event_ledger.py"
+TIMELINE_RENDER_SCRIPT = SCRIPTS_DIR / "render_timeline_views.py"
 
 MAINTENANCE_CYCLE_SCRIPT = SCRIPTS_DIR / "run_memory_maintenance_cycle.py"
 
@@ -77,6 +84,24 @@ def main():
     chunk_dir = CHUNKS_DIR / args.agent
     chunk_dir.mkdir(parents=True, exist_ok=True)
     clear_old_chunks(chunk_dir)
+
+    timeline = run_capture([
+        "python3",
+        str(TIMELINE_LEDGER_SCRIPT),
+        "--agent",
+        args.agent,
+    ]).strip()
+    print("Timeline ledger output:")
+    print(timeline)
+    print()
+
+    rendered_timeline = run_capture([
+        "python3",
+        str(TIMELINE_RENDER_SCRIPT),
+    ]).strip()
+    print("Timeline render output:")
+    print(rendered_timeline)
+    print()
 
     dehydrated = run_capture([
         "python3",

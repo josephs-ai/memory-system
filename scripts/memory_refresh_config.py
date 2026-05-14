@@ -1,3 +1,7 @@
+"""
+Configuration for periodic memory refresh cycles —
+defines intervals, scopes, and policies for background memory updates.
+"""
 from pathlib import Path
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
