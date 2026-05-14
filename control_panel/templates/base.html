@@ -40,6 +40,9 @@
       <a href="/services" class="{{ 'active' if page == 'services' }}">
         <span class="icon">⚙️</span> <span>Services</span>
       </a>
+      <a href="/architecture" class="{{ 'active' if page == 'architecture' }}">
+        <span class="icon">🏗️</span> <span>Architecture</span>
+      </a>
       <a href="/git" class="{{ 'active' if page == 'git' }}">
         <span class="icon">🔀</span> <span>Repository</span>
       </a>
@@ -441,29 +444,52 @@
           </form>
         </div>
 
-        {% if benchmark %}
-          {% if benchmark.mrr is defined %}
+        {% if benchmark and benchmark.aggregate is defined %}
+          {% set agg = benchmark.aggregate %}
           <div style="display: flex; gap: 16px; margin-bottom: 16px;">
             <div class="stat-card accent" style="flex: 1;">
-              <div class="value">{{ "%.2f" | format(benchmark.mrr or 0) }}</div>
+              <div class="value">{{ "%.2f" | format(agg.get('mean_mrr', 0)) }}</div>
               <div class="label">MRR</div>
             </div>
             <div class="stat-card green" style="flex: 1;">
-              <div class="value">{{ "%.2f" | format(benchmark.precision_at_1 or benchmark.get('precision@1', 0)) }}</div>
+              <div class="value">{{ "%.2f" | format(agg.get('mean_precision@1', 0)) }}</div>
               <div class="label">Precision@1</div>
             </div>
             <div class="stat-card purple" style="flex: 1;">
-              <div class="value">{{ "%.2f" | format(benchmark.ndcg_at_5 or benchmark.get('ndcg@5', 0)) }}</div>
+              <div class="value">{{ "%.2f" | format(agg.get('mean_ndcg@5', 0)) }}</div>
               <div class="label">nDCG@5</div>
             </div>
             <div class="stat-card cyan" style="flex: 1;">
-              <div class="value">{{ "%.2f" | format(benchmark.recall_at_10 or benchmark.get('recall@10', 0)) }}</div>
+              <div class="value">{{ "%.2f" | format(agg.get('mean_recall@10', 0)) }}</div>
               <div class="label">Recall@10</div>
             </div>
           </div>
-          {% endif %}
 
-          <pre>{{ benchmark | tojson(indent=2) }}</pre>
+          <p style="color: var(--text-2); font-size: 12px; margin-bottom: 4px;">
+            {{ agg.get('query_count', '?') }} queries · avg {{ "%.0f" | format(agg.get('mean_elapsed_ms', 0)) }}ms
+            {% if benchmark.computed_at %} · run at {{ benchmark.computed_at[:19] }}{% endif %}
+          </p>
+
+          {% if benchmark.per_query %}
+          <h3>Per-Query Results</h3>
+          <table>
+            <thead><tr><th>Query</th><th>Pipeline</th><th>P@1</th><th>MRR</th><th>nDCG@5</th><th>Time</th></tr></thead>
+            <tbody>
+              {% for q in benchmark.per_query %}
+              <tr>
+                <td><strong>{{ q.query_id }}</strong></td>
+                <td><span class="pill gray">{{ q.pipeline }}</span></td>
+                <td>{{ "%.2f" | format(q.get('precision@1', 0)) }}</td>
+                <td>{{ "%.2f" | format(q.get('mrr', 0)) }}</td>
+                <td>{{ "%.2f" | format(q.get('ndcg@5', 0)) }}</td>
+                <td>{{ q.elapsed_ms }}ms</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        {% elif benchmark and benchmark.error is defined %}
+        <pre style="color: var(--red);">{{ benchmark.error }}</pre>
         {% else %}
         <p style="color: var(--text-2); padding: 40px 0; text-align: center;">
           Click "Run Benchmark" to evaluate retrieval quality against the golden dataset.
@@ -510,6 +536,193 @@
         {% endfor %}
       </div>
     </div>
+
+    {% endif %}
+
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    <!-- ARCHITECTURE                                                      -->
+    <!-- ────────────────────────────────────────────────────────────────── -->
+    {% if page == "architecture" %}
+
+    <div class="grid">
+      <div class="card span-12">
+        <h2>Full Memory System Architecture</h2>
+        <p style="color: var(--text-2); margin-bottom: 16px;">
+          Complete data flow from transcript ingestion through retrieval. Click nodes for details.
+        </p>
+        <div id="arch-diagram">
+          <pre class="mermaid">
+flowchart TB
+    subgraph INGEST["📥 Ingestion Layer"]
+        direction LR
+        TP["Tracked Path Watcher<br/><small>inotify · file changes</small>"]
+        HB["Heartbeat Worker<br/><small>periodic checkpoints</small>"]
+        TX["Transcript Dehydrator<br/><small>session logs → chunks</small>"]
+    end
+
+    subgraph PROCESS["⚙️ Processing Pipeline"]
+        direction LR
+        CK["Chunker<br/><small>semantic splitting</small>"]
+        JG["Memory Judge<br/><small>relevance scoring</small>"]
+        EF["Field Extractor<br/><small>entity · property · value</small>"]
+        RT["Router<br/><small>inbox → active/discard</small>"]
+    end
+
+    subgraph STORE["💾 Storage Layer"]
+        direction LR
+        PG[("PostgreSQL<br/><small>18,686 memory items<br/>1,058 code chunks</small>")]
+        QD[("Qdrant<br/><small>18,602 + 1,266 vectors<br/>2 collections</small>")]
+        N4[("Neo4j<br/><small>1,308 nodes<br/>2,686 relationships</small>")]
+    end
+
+    subgraph CODE["🔗 Zero-Reread Code Engine"]
+        direction LR
+        AST["AST Parser<br/><small>Python · C++ · tree-sitter</small>"]
+        EMB["Code Embedder<br/><small>MiniLM → Qdrant</small>"]
+        GR["Graph Sync<br/><small>IMPORTS · CALLS · DEFINES</small>"]
+        REC["Reconciliation<br/><small>hash-based auto-repair</small>"]
+    end
+
+    subgraph RETRIEVE["🔍 Retrieval Layer"]
+        direction LR
+        HS["Hybrid Search<br/><small>pgvector + FTS + Qdrant</small>"]
+        CH["Context Hydrator<br/><small>code + memory + graph</small>"]
+        RR["Cross-Encoder Reranker<br/><small>relevance reranking</small>"]
+        AB["ABOUT_CODE Bridge<br/><small>memory ↔ code links</small>"]
+    end
+
+    subgraph SERVE["🌐 Serving Layer"]
+        direction LR
+        API["FastAPI Search Service<br/><small>/context endpoint</small>"]
+        CP["Control Panel<br/><small>this dashboard</small>"]
+        OC["OpenClaw Agents<br/><small>25 agents · multi-model</small>"]
+    end
+
+    subgraph ORCH["🎮 70-Level Orchestrator"]
+        direction LR
+        CD["Conductor<br/><small>10-phase governor</small>"]
+        WI["Work Items<br/><small>plan→build→test→ship</small>"]
+        LLM["Multi-Model Bridge<br/><small>Opus · GPT · Gemini</small>"]
+        ART["Asset Pipeline<br/><small>gpt-image-1 art gen</small>"]
+    end
+
+    INGEST --> PROCESS
+    PROCESS --> PG
+    PG --> QD
+    PG --> N4
+
+    CODE --> QD
+    CODE --> N4
+    CODE --> PG
+
+    PG --> RETRIEVE
+    QD --> RETRIEVE
+    N4 --> RETRIEVE
+
+    RETRIEVE --> API
+    API --> OC
+    API --> CP
+
+    ORCH --> LLM
+    ORCH --> API
+    ORCH --> PG
+
+    TP -.->|"file events"| CK
+    HB -.->|"checkpoints"| TX
+    AST -.->|"parse"| EMB
+    EMB -.->|"embed"| GR
+    HS -.->|"candidates"| RR
+    CH -.->|"hydrate"| AB
+    CD -.->|"dispatch"| WI
+
+    classDef ingest fill:#1e3a5f,stroke:#3b82f6,color:#e0f2fe
+    classDef process fill:#1a2e1a,stroke:#22c55e,color:#dcfce7
+    classDef store fill:#2e1065,stroke:#a78bfa,color:#f3e8ff
+    classDef code fill:#0c4a4a,stroke:#22d3ee,color:#cffafe
+    classDef retrieve fill:#422006,stroke:#eab308,color:#fef9c3
+    classDef serve fill:#450a0a,stroke:#ef4444,color:#fee2e2
+    classDef orch fill:#312e81,stroke:#818cf8,color:#e0e7ff
+
+    class TP,HB,TX ingest
+    class CK,JG,EF,RT process
+    class PG,QD,N4 store
+    class AST,EMB,GR,REC code
+    class HS,CH,RR,AB retrieve
+    class API,CP,OC serve
+    class CD,WI,LLM,ART orch
+          </pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Architecture legend -->
+    <div class="grid">
+      <div class="card span-4">
+        <h2>📥 Ingestion</h2>
+        <ul style="list-style: none; padding: 0;">
+          <li style="padding: 4px 0;"><span class="pill blue">Tracked Path Watcher</span> inotify-based file monitoring</li>
+          <li style="padding: 4px 0;"><span class="pill blue">Heartbeat Worker</span> periodic checkpoint creation</li>
+          <li style="padding: 4px 0;"><span class="pill blue">Transcript Dehydrator</span> session log → memory chunks</li>
+        </ul>
+      </div>
+      <div class="card span-4">
+        <h2>💾 Storage</h2>
+        <ul style="list-style: none; padding: 0;">
+          <li style="padding: 4px 0;"><span class="pill purple">PostgreSQL</span> 18,686 items + pgvector + FTS</li>
+          <li style="padding: 4px 0;"><span class="pill purple">Qdrant</span> 2 collections (memory + code)</li>
+          <li style="padding: 4px 0;"><span class="pill purple">Neo4j</span> knowledge graph + code graph</li>
+        </ul>
+      </div>
+      <div class="card span-4">
+        <h2>🔍 Retrieval</h2>
+        <ul style="list-style: none; padding: 0;">
+          <li style="padding: 4px 0;"><span class="pill yellow">Hybrid Search</span> vector + FTS + Qdrant fusion</li>
+          <li style="padding: 4px 0;"><span class="pill yellow">Context Hydrator</span> unified code+memory+graph</li>
+          <li style="padding: 4px 0;"><span class="pill yellow">Cross-Encoder</span> reranking for precision</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card span-6">
+        <h2>🔗 Zero-Reread Code Engine</h2>
+        <p style="color: var(--text-1);">
+          8-slice architecture: AST parsing (Python + C++ via tree-sitter) → embedding into Qdrant →
+          Neo4j graph (IMPORTS, CALLS, DEFINES, HAS_METHOD, ABOUT_CODE) → context hydration with
+          token-optimized output. File watcher integration for live updates in ~5s.
+        </p>
+      </div>
+      <div class="card span-6">
+        <h2>🎮 70-Level Orchestrator</h2>
+        <p style="color: var(--text-1);">
+          Enterprise game studio pipeline: Conductor (10-phase governor) → multi-model execution bridge
+          (Opus/GPT/Gemini) → UE5 code generation → art generation (gpt-image-1) → QA automation →
+          platform certification → LiveOps → economy simulation → legal compliance. 4,300+ tests.
+        </p>
+      </div>
+    </div>
+
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: 'dark',
+        themeVariables: {
+          darkMode: true,
+          background: '#0a0e17',
+          primaryColor: '#1e3a5f',
+          primaryTextColor: '#f1f5f9',
+          lineColor: '#64748b',
+          fontSize: '13px',
+        },
+        flowchart: {
+          htmlLabels: true,
+          curve: 'basis',
+          useMaxWidth: true,
+          padding: 12,
+        },
+      });
+    </script>
 
     {% endif %}
 

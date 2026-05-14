@@ -236,13 +236,30 @@ def compute_aggregate_metrics(per_query_metrics: list[dict]) -> dict:
 # Benchmark Runner
 # ---------------------------------------------------------------------------
 
+_EMBED_MODEL = None
+
+
+def _get_embed_model():
+    """Lazy-load the sentence-transformer embedding model (MiniLM, 384-dim)."""
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        _EMBED_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return _EMBED_MODEL
+
+
+def _embed_query(text: str) -> list[float]:
+    """Embed a query string using MiniLM (matches existing DB embeddings)."""
+    model = _get_embed_model()
+    emb = model.encode(text, normalize_embeddings=True)
+    return emb.tolist()
+
+
 def run_search_memory_query(query: str, top_k: int = 10, project_id: str | None = None) -> list[str]:
     """Execute a query against search_memory pipeline, return item IDs in order."""
-    from memory_db import hybrid_search_memory_items, close_pool
-    from sentence_transformers import SentenceTransformer
+    from memory_db import hybrid_search_memory_items
 
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    emb = model.encode(query, normalize_embeddings=True)
+    emb = _embed_query(query)
 
     results = hybrid_search_memory_items(
         emb,
@@ -545,13 +562,11 @@ def seed_golden_dataset():
     top 4-5 get relevance=1 (partial). Human review recommended after seeding.
     """
     from memory_db import hybrid_search_memory_items, close_pool
-    from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     entries = []
 
     for seed in SEED_QUERIES:
-        emb = model.encode(seed["query"], normalize_embeddings=True)
+        emb = _embed_query(seed["query"])
         results = hybrid_search_memory_items(
             emb,
             query_text=seed["query"],

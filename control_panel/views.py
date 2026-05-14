@@ -10,6 +10,7 @@ from services import (
     agent_list,
     docker_status,
     git_info,
+    last_benchmark_result,
     last_test_result,
     memory_search,
     memory_stats,
@@ -105,7 +106,7 @@ def tests_run(request: Request):
 
 @router.get("/benchmarks", response_class=HTMLResponse)
 def benchmarks_page(request: Request):
-    return _render(request, "benchmarks", "Benchmarks", benchmark={})
+    return _render(request, "benchmarks", "Benchmarks", benchmark=last_benchmark_result())
 
 
 @router.post("/benchmarks/run", response_class=HTMLResponse)
@@ -126,6 +127,11 @@ def services_page(request: Request):
 
 
 # ── Git ────────────────────────────────────────────────────────────────────
+
+@router.get("/architecture", response_class=HTMLResponse)
+def architecture_page(request: Request):
+    return _render(request, "architecture", "System Architecture")
+
 
 @router.get("/git", response_class=HTMLResponse)
 def git_page(request: Request):

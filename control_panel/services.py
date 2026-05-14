@@ -319,25 +319,42 @@ def last_test_result() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def run_benchmark() -> dict[str, Any]:
-    """Run the retrieval benchmark."""
+    """Run the retrieval benchmark. Returns the report JSON."""
+    report_path = MEMORY_INDEX / "health" / "retrieval_benchmark_report.json"
     try:
         proc = subprocess.run(
-            [PY, str(SCRIPTS_DIR / "retrieval_benchmark.py")],
-            capture_output=True, text=True, timeout=60,
+            [PY, str(SCRIPTS_DIR / "retrieval_benchmark.py"), "run", "--save-baseline"],
+            capture_output=True, text=True, timeout=120,
             cwd=str(SCRIPTS_DIR),
             env={**os.environ, "OPENCLAW_MEMORY_DB_DSN": DB_DSN},
         )
-        # Parse JSON output
+        # Read the full report artifact
+        if report_path.exists():
+            with open(report_path) as f:
+                return json.load(f)
+        # Fallback: parse aggregate from stdout
         for line in reversed((proc.stdout or "").splitlines()):
             line = line.strip()
             if line.startswith("{"):
                 try:
-                    return json.loads(line)
+                    return {"aggregate": json.loads(line), "output": "parsed from stdout"}
                 except Exception:
                     pass
         return {"output": proc.stdout[-2000:], "stderr": proc.stderr[-1000:]}
     except Exception as e:
         return {"error": str(e)}
+
+
+def last_benchmark_result() -> dict[str, Any]:
+    """Load the last saved benchmark report, if any."""
+    report_path = MEMORY_INDEX / "health" / "retrieval_benchmark_report.json"
+    try:
+        if report_path.exists():
+            with open(report_path) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
 
 # ---------------------------------------------------------------------------
