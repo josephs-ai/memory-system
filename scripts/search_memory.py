@@ -3,6 +3,7 @@ import os
 import httpx
 import argparse
 import json
+import logging
 import math
 import sys
 from pathlib import Path
@@ -17,6 +18,10 @@ from memory_db import hybrid_search_memory_items, close_pool
 from vector_store_qdrant import search_memory_vectors
 from extract_memory_fields import extract_fields
 from graph_store_neo4j import get_neo4j_driver
+from feedback_score_engine import feedback_boost_batch, classify_query_type
+from temporal_scoring import compute_temporal_boost
+
+LOGGER = logging.getLogger("openclaw.search_memory")
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
@@ -224,15 +229,39 @@ def main():
     for item in canonical_items:
         text = item.get("text", "")
         seen.add(text)
-        scored.append(
-            {
-                "score": float(item.get("final_score", 0) or 0) + 0.10,
-                "source_type": "canonical",
-                "path": "db:memory_items",
-                "text": text,
-                "mtime": float("inf"),
-            }
-        )
+        base_score = float(item.get("final_score", 0) or 0) + 0.10
+        is_summary = item.get("memory_type") == "summary"
+
+        # Temporal boost (P3: time-aware scoring)
+        temporal_boost = 0.0
+        try:
+            temporal_boost = compute_temporal_boost(
+                item.get("first_seen") or item.get("last_confirmed"),
+                args.query,
+            )
+        except Exception:
+            pass
+
+        row = {
+            "score": base_score - (0.05 if is_summary else 0) + temporal_boost,
+            "source_type": "canonical_summary" if is_summary else "canonical",
+            "path": "db:memory_items",
+            "text": text,
+            "mtime": float("inf"),
+            "item_id": item.get("id"),
+        }
+
+        if temporal_boost != 0.0:
+            row["temporal_boost"] = temporal_boost
+
+        # Summary drill-down metadata
+        if is_summary:
+            constituent_ids = item.get("constituent_item_ids") or []
+            row["is_summary"] = True
+            row["resolution_level"] = item.get("resolution_level")
+            row["constituent_count"] = len(constituent_ids) if isinstance(constituent_ids, list) else 0
+
+        scored.append(row)
 
     qdrant_hits = search_memory_vectors(query_embedding, limit=20)
 
@@ -250,8 +279,23 @@ def main():
                 "path": "qdrant:memory_items",
                 "text": text,
                 "mtime": float("inf"),
+                "item_id": payload.get("id"),
             }
         )
+
+    # --- Feedback boost (P0: closed-loop retrieval) ---
+    feedback_item_ids = [r["item_id"] for r in scored if r.get("item_id")]
+    if feedback_item_ids:
+        try:
+            query_type = classify_query_type(args.query)
+            boosts = feedback_boost_batch(feedback_item_ids, query_type=query_type)
+            for row in scored:
+                iid = row.get("item_id")
+                if iid and iid in boosts:
+                    row["feedback_boost"] = boosts[iid]
+                    row["score"] += boosts[iid] * 0.15  # Conservative weight
+        except Exception:
+            LOGGER.debug("Feedback boost failed, continuing without", exc_info=True)
 
     query_entity = query_fields.get("entity")
     query_property = query_fields.get("property")

@@ -1,0 +1,27 @@
+# Core dependencies
+psycopg[binary]>=3.1,<4
+psycopg-pool>=3.1,<4
+qdrant-client>=1.7,<2
+neo4j>=5.0,<6
+numpy>=1.24,<3
+pydantic>=2.0,<3
+
+# API server
+fastapi>=0.100,<1
+uvicorn>=0.20,<1
+httpx>=0.24,<1
+
+# ML / Embeddings
+sentence-transformers>=2.2,<4
+torch>=2.0
+FlagEmbedding>=1.0
+
+# Code parsing (optional — for zero-reread code context)
+tree-sitter>=0.21,<1
+tree-sitter-cpp>=0.21,<1
+
+# File watching
+watchdog>=3.0,<5
+
+# System
+psutil>=5.9,<7

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: openclaw_memory
+          POSTGRES_USER: openclaw
+          POSTGRES_PASSWORD: openclaw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openclaw -d openclaw_memory"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      qdrant:
+        image: qdrant/qdrant:v1.12.1
+        ports:
+          - 6333:6333
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Initialize database schema
+        env:
+          OPENCLAW_MEMORY_DSN: "host=localhost dbname=openclaw_memory user=openclaw password=openclaw"
+        run: |
+          psql "$OPENCLAW_MEMORY_DSN" -f scripts/memory_db_schema.sql
+
+      - name: Run tests
+        env:
+          OPENCLAW_MEMORY_DSN: "host=localhost dbname=openclaw_memory user=openclaw password=openclaw"
+        run: |
+          cd scripts && python -m pytest \
+            test_feedback_score_engine.py \
+            test_feedback_retrieval_integration.py \
+            test_auto_demote_and_metrics.py \
+            test_feedback_query_type_learning.py \
+            test_retrieval_benchmark.py \
+            test_consolidation_grouper.py \
+            test_summary_generator.py \
+            test_consolidation_retrieval.py \
+            test_temporal_scoring.py \
+            test_memory_knowledge_graph.py \
+            test_streaming_ingestion.py \
+            test_multimodal_memory.py \
+            -v --tb=short
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check scripts/ --select E,F,W --ignore E501

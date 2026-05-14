@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openclaw-memory"
+version = "0.1.0"
+description = "Enterprise-grade long-term memory system for AI agents — hybrid retrieval, self-improving feedback, progressive summarization, temporal reasoning, and semantic knowledge graphs."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Joseph Ding"},
+]
+keywords = ["memory", "ai", "agents", "retrieval", "rag", "knowledge-graph", "embeddings"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database",
+]
+
+dependencies = [
+    "psycopg[binary]>=3.1,<4",
+    "psycopg-pool>=3.1,<4",
+    "qdrant-client>=1.7,<2",
+    "neo4j>=5.0,<6",
+    "numpy>=1.24,<3",
+    "pydantic>=2.0,<3",
+    "fastapi>=0.100,<1",
+    "uvicorn>=0.20,<1",
+    "httpx>=0.24,<1",
+    "sentence-transformers>=2.2,<4",
+    "watchdog>=3.0,<5",
+    "psutil>=5.9,<7",
+]
+
+[project.optional-dependencies]
+code = [
+    "tree-sitter>=0.21,<1",
+    "tree-sitter-cpp>=0.21,<1",
+]
+rerank = [
+    "FlagEmbedding>=1.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+all = [
+    "openclaw-memory[code,rerank,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/josephs-ai/Memory-System-claw"
+Repository = "https://github.com/josephs-ai/Memory-System-claw"
+Issues = "https://github.com/josephs-ai/Memory-System-claw/issues"
+
+[project.scripts]
+openclaw-memory = "scripts.search_memory_service:main"
+
+[tool.pytest.ini_options]
+testpaths = ["scripts"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts*"]

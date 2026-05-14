@@ -28,7 +28,20 @@ def main():
     parser.add_argument("--selected-id", required=True)
     parser.add_argument("--note", default="")
     parser.add_argument("--target-file", default=None)
+    parser.add_argument("--query-text", default=None,
+                        help="The query that produced this retrieval result")
+    parser.add_argument("--query-type", default=None,
+                        help="Query type: code|memory|timeline|general")
     args = parser.parse_args()
+
+    # Auto-classify query type if query_text provided but query_type not
+    query_type = args.query_type
+    if args.query_text and not query_type:
+        try:
+            from feedback_score_engine import classify_query_type
+            query_type = classify_query_type(args.query_text)
+        except Exception:
+            pass
 
     row = {
         "selected_id": args.selected_id,
@@ -40,6 +53,8 @@ def main():
         "candidate_file": None,
         "target_file": args.target_file,
         "include_superseded": None,
+        "query_text": args.query_text,
+        "query_type": query_type,
     }
 
     insert_retrieval_feedback_row(row)

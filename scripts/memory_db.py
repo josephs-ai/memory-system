@@ -20,6 +20,15 @@ MEMORY_ITEM_COLUMNS = [
     "text",
     "memory_type",
     "scope",
+    "project_id",
+    "subproject_id",
+    "workflow_id",
+    "pipeline_id",
+    "context_scope_id",
+    "context_scope_type",
+    "context_scope_payload",
+    "inheritance_policy",
+    "scope_confidence",
     "entity",
     "property",
     "value",
@@ -54,7 +63,7 @@ MEMORY_ITEM_COLUMNS = [
     "feedback_last_applied_at",
 ]
 
-JSONB_COLUMNS = {"tags", "candidate_reasons"}
+JSONB_COLUMNS = {"tags", "candidate_reasons", "context_scope_payload"}
 
 UPSERT_SQL = f"""
 INSERT INTO memory_items (
@@ -66,6 +75,15 @@ ON CONFLICT (id) DO UPDATE SET
     text = EXCLUDED.text,
     memory_type = EXCLUDED.memory_type,
     scope = EXCLUDED.scope,
+    project_id = EXCLUDED.project_id,
+    subproject_id = EXCLUDED.subproject_id,
+    workflow_id = EXCLUDED.workflow_id,
+    pipeline_id = EXCLUDED.pipeline_id,
+    context_scope_id = EXCLUDED.context_scope_id,
+    context_scope_type = EXCLUDED.context_scope_type,
+    context_scope_payload = EXCLUDED.context_scope_payload,
+    inheritance_policy = EXCLUDED.inheritance_policy,
+    scope_confidence = EXCLUDED.scope_confidence,
     entity = EXCLUDED.entity,
     property = EXCLUDED.property,
     value = EXCLUDED.value,
@@ -520,8 +538,10 @@ def insert_retrieval_feedback_row(row: dict):
                     candidate_file,
                     target_file,
                     include_superseded,
+                    query_text,
+                    query_type,
                     payload
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     row.get("selected_id"),
@@ -533,6 +553,8 @@ def insert_retrieval_feedback_row(row: dict):
                     row.get("candidate_file"),
                     row.get("target_file"),
                     row.get("include_superseded"),
+                    row.get("query_text"),
+                    row.get("query_type"),
                     Jsonb(row),
                 ),
             )
@@ -664,7 +686,7 @@ def search_memory_items_by_terms(query: str, *, status: str = "active", limit: i
 
     sql = """
         SELECT
-            id, text, memory_type, scope, entity, property, value, status,
+            id, text, memory_type, lifecycle_state, scope, entity, property, value, status,
             confidence, importance, freshness_class,
             source_agent, source_session, source_chunk,
             first_seen, last_confirmed, supersedes,
@@ -732,7 +754,7 @@ def search_memory_items_by_terms_rbac(
 
     sql = """
         SELECT
-            id, text, memory_type, scope, entity, property, value, status,
+            id, text, memory_type, lifecycle_state, scope, entity, property, value, status,
             confidence, importance, freshness_class,
             source_agent, source_session, source_chunk,
             first_seen, last_confirmed, supersedes,
@@ -813,12 +835,21 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     text,
                     memory_type,
                     scope,
+                    project_id,
+                    subproject_id,
+                    workflow_id,
+                    pipeline_id,
+                    context_scope_id,
+                    context_scope_type,
+                    context_scope_payload,
+                    inheritance_policy,
+                    scope_confidence,
                     entity,
                     property,
                     value,
                     status,
                     confidence,
-                    importance,
+                    0.8 as importance,
                     freshness_class,
                     source_agent,
                     source_session,
@@ -837,16 +868,25 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     "text": row[1],
                     "memory_type": row[2],
                     "scope": row[3],
-                    "entity": row[4],
-                    "property": row[5],
-                    "value": row[6],
-                    "status": row[7],
-                    "confidence": row[8],
-                    "importance": row[9],
-                    "freshness_class": row[10],
-                    "source_agent": row[11],
-                    "source_session": row[12],
-                    "source_chunk": row[13],
+                    "project_id": row[4],
+                    "subproject_id": row[5],
+                    "workflow_id": row[6],
+                    "pipeline_id": row[7],
+                    "context_scope_id": row[8],
+                    "context_scope_type": row[9],
+                    "context_scope_payload": row[10],
+                    "inheritance_policy": row[11],
+                    "scope_confidence": row[12],
+                    "entity": row[13],
+                    "property": row[14],
+                    "value": row[15],
+                    "status": row[16],
+                    "confidence": row[17],
+                    "importance": row[18],
+                    "freshness_class": row[19],
+                    "source_agent": row[20],
+                    "source_session": row[21],
+                    "source_chunk": row[22],
                 }
                 for row in rows
             ]
@@ -885,7 +925,7 @@ def hybrid_search_memory_items(
         scored AS (
             SELECT
                 m.id, m.text, m.memory_type, m.scope, m.entity, m.property, m.value, m.status,
-                m.confidence, m.importance, m.freshness_class,
+                m.confidence, 0.8 as importance, m.freshness_class,
                 m.source_agent, m.source_session, m.source_chunk,
                 m.first_seen, m.last_confirmed, m.supersedes,
                 m.tags, m.notes, m.candidate_id, m.candidate_score, m.candidate_reasons,
@@ -959,7 +999,7 @@ def hybrid_search_memory_items(
                     )
                 ) AS structured_bonus,
 
-                COALESCE(m.importance, 0.75) * 0.25 AS importance_bonus
+                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus
 
             FROM memory_items m
             JOIN memory_item_embeddings e ON e.memory_id = m.id

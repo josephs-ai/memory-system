@@ -5,33 +5,44 @@ __pycache__/
 *.log
 *.db
 *.sqlite
+*.sqlite3
 *.tar.gz
 *.zip
 *.bak
 *.swp
+*.egg-info/
+dist/
+build/
 
+# Runtime state
 embeddings/
 chunks/
 dehydrated/chunks_runtime/
+runtime/
+logs/
 
-control_panel/__pycache__/
-scripts/__pycache__/
-
+# Virtual envs
 venv/
 .venv/
 
+# Environment files
 *.env
 .env
 .env.*
 
+# IDE
+.idea/
+.vscode/
+*.code-workspace
 
-
+# Infrastructure data (use docker volumes)
 control_panel/neo4j_data/
 control_panel/qdrant_data/
-*.db
-*.sqlite
-*.sqlite3
-*.tar.gz
-*.bak
-__pycache__/
-*.pyc
+control_panel/__pycache__/
+scripts/__pycache__/
+
+# Health artifacts (generated)
+health/*.json
+
+# Backup files
+README.md.bak

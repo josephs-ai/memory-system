@@ -1,331 +1,261 @@
-# OpenClaw Memory System
+# 🧠 OpenClaw Memory System
 
-A database-backed long-term memory system for OpenClaw that turns raw session and transcript activity into structured, reviewable, retrievable, durable memory.
+**Enterprise-grade long-term memory for AI agents.** Hybrid retrieval, self-improving feedback, progressive summarization, temporal reasoning, and semantic knowledge graphs — in one system.
 
-## What this system does
-
-The memory system takes conversation and session output, removes junk, extracts durable updates, classifies them into structured memory items, routes them by confidence and scope, stores approved memory in a canonical database, syncs vector and graph retrieval layers, and records retrieval feedback so ranking can improve over time.
-
-In practice, it is built to answer one question well:
-
-> How do you turn temporary agent and session activity into trustworthy long-term memory without filling the system with junk?
+[![CI](https://github.com/josephs-ai/Memory-System-claw/actions/workflows/ci.yml/badge.svg)](https://github.com/josephs-ai/Memory-System-claw/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 ---
 
-## High-level pipeline
+## Why This Exists
 
-1. **Transcript / session source**
-   - Raw session output is produced by Claw.
+Most AI memory systems store flat key-value pairs and call it done. This one doesn't.
 
-2. **Dehydration**
-   - Transcript noise and low-value structure are stripped out.
+OpenClaw Memory turns raw agent conversations into **structured, queryable, self-improving long-term memory** — with 12 memory types, lifecycle management, hybrid retrieval (full-text + vector + cross-encoder reranking), and a feedback loop that makes retrieval better over time without any manual tuning.
 
-3. **Chunking + update extraction**
-   - The cleaned transcript is split into chunks and candidate memory updates are extracted.
+### What makes it different
 
-4. **Judging / structuring**
-   - Candidates are classified into structured memory items with:
-     - `memory_type`
-     - `scope`
-     - `entity`
-     - `property`
-     - `value`
-     - `confidence`
-     - `importance`
-     - `suggested_route`
-
-5. **Routing**
-   - Items are routed to:
-     - canonical memory directly
-     - inbox
-     - pending stable approval
-     - discarded
-
-6. **Approval / lifecycle**
-   - Higher-risk stable memory can require review before promotion.
-   - Items can also be promoted, demoted, restored, or rejected.
-
-7. **Canonical storage**
-   - Durable memory is stored in `memory_items` through the DB layer.
-
-8. **Embedding + graph sync**
-   - Active canonical items are embedded and written into:
-     - the local embedding table
-     - Qdrant for vector recall
-   - Structured `entity/property/value` memory is also synced into Neo4j for graph recall.
-
-9. **Hybrid retrieval**
-   - Retrieval now combines:
-     - database lexical / structured search
-     - Qdrant vector search
-     - Neo4j graph recall
-     - cross-encoder reranking
-
-10. **Feedback**
-   - Retrieval results can be marked useful or bad.
-   - Feedback is stored and can be used to improve ranking behavior.
+| Feature | mem0 | Letta/MemGPT | Zep | **This** |
+|---------|------|-------------|-----|----------|
+| Hybrid retrieval (FTS + vector + rerank) | ❌ | ❌ | Partial | ✅ |
+| Self-improving feedback loop | ❌ | ❌ | ❌ | ✅ |
+| Built-in IR benchmarks (precision/recall/MRR/nDCG) | ❌ | ❌ | ❌ | ✅ |
+| Progressive time-based summarization | ❌ | ❌ | ❌ | ✅ |
+| Temporal reasoning in retrieval | ❌ | ❌ | ❌ | ✅ |
+| Memory knowledge graph | ❌ | ❌ | Partial | ✅ |
+| Structured memory types (12 types) | ❌ | ❌ | ❌ | ✅ |
+| Memory lifecycle management | ❌ | Partial | ❌ | ✅ |
+| Code-aware context (AST + graph) | ❌ | ❌ | ❌ | ✅ |
 
 ---
 
-## Core design principles
+## Quickstart
 
-- **Structured memory over raw blobs**  
-  Durable memory should be explicit and atomic, not vague transcript residue.
-
-- **Confidence-gated durability**  
-  Not all observations deserve permanent memory.
-
-- **Scope matters**  
-  Stable system policy, project-scoped state, and daily observations should not be treated the same way.
-
-- **Hybrid retrieval beats single-mode retrieval**  
-  Durable memory should be discoverable through exact phrasing, paraphrase, and graph structure.
-
-- **Feedback closes the loop**  
-  Retrieval quality should improve from operator signals, not stay static.
-
-- **Postgres remains the source of truth**  
-  Vector and graph layers support retrieval, but canonical lifecycle and approval still live in the main DB.
-
----
-
-## Current architecture
-
-The system now uses a multi-layer memory architecture:
-
-### 1. Postgres / canonical lifecycle layer
-Used for:
-- canonical memory rows
-- queues
-- approvals
-- lifecycle changes
-- embeddings table
-- retrieval feedback
-
-### 2. Qdrant / vector retrieval layer
-Used for:
-- semantic vector recall over active canonical memory
-
-### 3. Neo4j / graph memory layer
-Used for:
-- entity / property / value graph relationships
-- graph-assisted recall
-- conflict and relationship inspection
-
-### 4. Cross-encoder reranker
-Used for:
-- final ranking of merged candidates from DB, Qdrant, and Neo4j
-
----
-
-## Main folders
-
-### `.memory-index/scripts/`
-Core pipeline scripts, routing logic, retrieval, diagnostics, maintenance, vector helpers, and graph helpers.
-
-### `.memory-index/control_panel/`
-Split web UI for:
-- agent management
-- heartbeat configuration
-- project tracker
-- command runner
-- architecture explorer
-- hybrid memory search
-- conflict controls
-- live queue / heartbeat monitoring
-
-### `memory/`
-Human-readable memory and project files plus review-oriented artifacts.
-
----
-
-## Most important scripts
-
-## Database / canonical memory
-- `memory_db.py`  
-  Main DB access layer for memory items, queues, embeddings, feedback, and search helpers.
-
-- `approve_pending_memory_item.py`  
-  Approves stable memory from pending review into canonical storage.
-
-- `sync_registry_to_markdown.py`  
-  Syncs canonical DB state into human-readable markdown mirrors.
-
-## Ingest / judgment
-- `dehydrate_transcript.py`  
-  Cleans raw transcript and session output.
-
-- `chunk_by_topic.py`  
-  Splits cleaned transcript into usable chunks.
-
-- `extract_chunk_updates.py`  
-  Extracts candidate memory updates from chunks.
-
-- `extract_memory_fields.py`  
-  Extracts entity / property / value structure and query hints.
-
-- `judge_memory_candidates.py`  
-  Converts candidates into structured memory records and assigns confidence, importance, and route hints.
-
-## Routing / policy
-- `memory_routing_rules.py`  
-  Shared routing-policy helper logic, including safe stable auto-promotion rules.
-
-- `route_memory_items_batch.py`  
-  Main batch router for judged items.
-
-- `route_memory_item.py`  
-  Single-item routing path.
-
-## Retrieval / embeddings / graph
-- `embed_memory_items.py`  
-  Encodes active canonical memory into embeddings and dual-writes vectors.
-
-- `search_memory.py`  
-  Main hybrid retrieval path: DB + Qdrant + Neo4j + reranking.
-
-- `search_memory_rbac.py`  
-  Hybrid retrieval with sensitivity / access filtering.
-
-- `search_qdrant.py`  
-  Direct Qdrant vector retrieval sanity check.
-
-- `vector_store_qdrant.py`  
-  Qdrant helper layer for collection creation, upsert, and search.
-
-- `graph_store_neo4j.py`  
-  Neo4j helper layer for graph constraints and graph upserts.
-
-- `sync_memory_to_neo4j.py`  
-  Syncs canonical memory rows into the Neo4j graph.
-
-- `query_neo4j.py`  
-  Direct graph query sanity check.
-
-- `rerank_crossencoder.py`  
-  Test script for final reranking with a cross-encoder.
-
-## Feedback / diagnostics
-- `mark_retrieval_useful.py`
-- `mark_retrieval_bad.py`
-- `show_review_queue.py`
-- `report_memory_maintenance.py`
-- `test_hybrid_search.py`
-
----
-
-## Memory states / queues
-
-### `memory_items`
-Canonical durable memory table.
-
-### `memory_inbox`
-Review queue for uncertain, project-scoped, or underspecified items.
-
-### `memory_pending_stable`
-Approval queue for strong stable memories that are not yet safe enough to auto-promote.
-
-### `memory_discarded`
-Discard cache and rejection history.
-
-### `memory_item_embeddings`
-Local embedding table used alongside vector retrieval.
-
-### `retrieval_feedback`
-Feedback table for retrieval quality signals.
-
----
-
-## Current routing behavior
-
-The system is mostly automatic, but not blindly so.
-
-- Low-confidence or junk-like items are discarded.
-- Project-scoped items usually go to inbox / review flow.
-- Strong stable items can:
-  - auto-promote if they meet the stricter `stable_safe_auto` rule
-  - otherwise go to `pending_stable`
-
-The shared source of truth for this policy should live in:
-
-- `memory_routing_rules.py`
-
----
-
-## Stable safe auto-promotion
-
-A stable memory can auto-promote only when it is safe enough.
-
-Typical requirements:
-- `scope == stable`
-- high confidence
-- high importance
-- full structure (`entity`, `property`, `value`)
-- atomic / short enough to be durable
-- allowed memory type
-
-Anything below that threshold should still go through review.
-
----
-
-## Retrieval stack
-
-### Embedding model
-- `sentence-transformers/all-MiniLM-L6-v2`
-
-### Vector store
-- Qdrant
-
-### Graph store
-- Neo4j
-
-### Reranker
-- `cross-encoder/ms-marco-MiniLM-L-6-v2`
-
-### Final hybrid retrieval path
-The main retrieval path in `search_memory.py` now combines:
-- database hybrid lexical / structured search
-- Qdrant semantic recall
-- Neo4j graph recall
-- cross-encoder reranking on the merged top candidates
-
-This means memory can now be retrieved by:
-- exact matching
-- paraphrase similarity
-- entity / property / value graph structure
-- final semantic reranking
-
----
-
-## Control panel
-
-The active UI is the split control panel under:
-
-- `.memory-index/control_panel/`
-
-It is used to inspect and manage:
-- agents
-- heartbeat rules
-- tracked paths
-- projects
-- commands
-- memory architecture
-- live queue state
-- conflict controls
-- hybrid search
-
-The control panel now includes:
-- **Memory flow monitor**
-- **Conflict resolution panel**
-- **Heartbeat monitor**
-- **Hybrid memory search page**
-
-Legacy or backup single-file control-panel code should be treated as non-authoritative.
-
----
-
-## Running the control panel
+### 1. Start infrastructure
 
 ```bash
-cd ~/.openclaw/workspace/.memory-index/control_panel
-OPENCLAW_CONTROL_PANEL_PORT=8788 ~/.openclaw/venvs/memory-db/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8788 --reload
+git clone https://github.com/josephs-ai/Memory-System-claw.git
+cd Memory-System-claw
+docker compose up -d
+```
+
+This starts PostgreSQL, Qdrant, and Neo4j.
+
+### 2. Install
+
+```bash
+pip install -e ".[all]"
+```
+
+### 3. Configure
+
+```bash
+export OPENCLAW_MEMORY_DSN="host=localhost dbname=openclaw_memory user=openclaw password=openclaw"
+```
+
+### 4. Initialize the database
+
+```bash
+psql "$OPENCLAW_MEMORY_DSN" -f scripts/memory_db_schema.sql
+```
+
+### 5. Start the search service
+
+```bash
+python scripts/search_memory_service.py --port 8791
+```
+
+### 6. Query memory
+
+```bash
+curl "http://localhost:8791/search?q=how+does+the+retrieval+pipeline+work&limit=5"
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Agent Sessions                           │
+└──────────────┬──────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────┐
+│   Transcript Dehydration  │  Strip noise, extract signal
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│   Chunk + Extract Updates │  Split into candidate memory items
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│   Judge + Structure       │  Classify: type, scope, entity, confidence
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────┐
+│   Route + Deduplicate     │  Merge with existing, handle supersedes
+└──────────┬───────────────┘
+           ▼
+┌──────────────────────────────────────────────────────────┐
+│                    Memory Store                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
+│  │PostgreSQL│  │  Qdrant  │  │  Neo4j   │               │
+│  │ 18K+     │  │ Vectors  │  │ Graph    │               │
+│  │ items    │  │ 384-dim  │  │ Links    │               │
+│  └──────────┘  └──────────┘  └──────────┘               │
+└──────────────────────┬───────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────┐
+│              Hybrid Retrieval Pipeline                    │
+│                                                          │
+│  FTS (ts_rank) ──┐                                       │
+│  Vector search ──┼──► Score fusion ──► Cross-encoder     │
+│  Graph context ──┘    + feedback      reranking          │
+│                       + temporal       ──► Final results │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Core Capabilities
+
+### 🔄 Self-Improving Retrieval (P0)
+Memory gets better the more you use it. Every retrieval action can be marked useful/bad, and feedback scores are blended into future rankings — no retraining needed.
+
+```python
+from scripts.mark_retrieval_useful import mark_useful
+from scripts.mark_retrieval_bad import mark_bad
+
+mark_useful(item_id="mem-abc123", query="how does auth work")
+mark_bad(item_id="mem-xyz789", query="deployment steps")
+```
+
+### 📊 Evaluation Benchmarks (P1)
+Built-in IR metrics to measure and prevent retrieval regression:
+
+```bash
+python scripts/retrieval_benchmark.py seed    # Create golden dataset
+python scripts/retrieval_benchmark.py run     # Run benchmark
+python scripts/retrieval_benchmark.py report  # Generate report
+```
+
+Tracks: Precision@K, Recall@K, MRR, nDCG. Alerts on >5% regression.
+
+### 📝 Progressive Summarization (P2)
+Old memories are automatically consolidated — daily summaries after 7 days, weekly after 30, monthly after 90. Originals are archived, not deleted.
+
+### ⏰ Temporal Reasoning (P3)
+Retrieval understands time. Recent items get a gentle boost; "what happened last week" queries match items from that time window instead of favoring recency.
+
+### 🕸️ Knowledge Graph (P4)
+Memories are linked by typed relationships — SUPERSEDES, CAUSED_BY, CONTRADICTS, SUPPORTS, DEPENDS_ON, RELATES_TO — enabling graph traversal for context expansion.
+
+### ⚡ Streaming Ingestion (P5)
+Event-driven architecture for real-time memory creation. Agent actions immediately produce queryable memories via an in-process pub/sub bus.
+
+### 🖼️ Multi-Modal (P6)
+Images, diagrams, screenshots, and structured data stored as description-indexed memory items with content hashing and modality metadata.
+
+---
+
+## Memory Types
+
+| Type | Description |
+|------|-------------|
+| `decision` | Choices made and their rationale |
+| `lesson_learned` | Insights from mistakes or successes |
+| `fact` | Verified information |
+| `rule` | Operational rules and constraints |
+| `architecture_rule` | System design principles |
+| `preference` | User/agent preferences |
+| `observation` | Noted behaviors or patterns |
+| `implementation_pattern` | Code patterns worth remembering |
+| `learned_fix` | Bug fixes and workarounds |
+| `bug_history` | Known issues and their resolution |
+| `episodic` | Narrative events |
+| `feature_summary` | Feature-level summaries |
+
+---
+
+## Memory Lifecycle
+
+```
+candidate → durable → [superseded | consolidated | discarded]
+                 ↑
+           re-confirmed
+```
+
+- **candidate**: Newly extracted, awaiting confirmation
+- **durable**: Confirmed, actively retrievable
+- **superseded**: Replaced by a newer item (linked via SUPERSEDES)
+- **consolidated**: Rolled into a summary (P2)
+- **discarded**: Low-quality, removed from active retrieval
+
+---
+
+## Project Structure
+
+```
+scripts/
+├── search_memory.py              # Core hybrid search
+├── search_memory_service.py      # FastAPI search API
+├── context_hydrator.py           # Unified retrieval (code + memory + graph)
+├── memory_db.py                  # PostgreSQL operations
+├── embed_memory_items.py         # Qdrant vector indexing
+├── feedback_score_engine.py      # P0: Self-improving retrieval
+├── retrieval_benchmark.py        # P1: IR evaluation
+├── consolidation_grouper.py      # P2: Time-based grouping
+├── summary_generator.py          # P2: Summary creation
+├── temporal_scoring.py           # P3: Time-aware scoring
+├── memory_knowledge_graph.py     # P4: Semantic links
+├── streaming_ingestion.py        # P5: Event-driven ingestion
+├── multimodal_memory.py          # P6: Multi-modal support
+├── parse_code_ast.py             # AST parser for code context
+├── sync_code_graph.py            # Code → Neo4j graph
+├── rerank_crossencoder.py        # Cross-encoder reranking
+├── dehydrate_transcript.py       # Transcript → clean text
+├── generate_memory_candidates.py # Extract candidate memories
+├── memory_db_schema.sql          # Database schema
+└── test_*.py                     # 466 tests
+```
+
+---
+
+## Running Tests
+
+```bash
+# All tests (excluding integration tests requiring live DB)
+python -m pytest scripts/ --ignore=scripts/test_hybrid_search.py -q
+
+# Just the P0-P6 capability tests (no DB needed)
+python -m pytest scripts/test_feedback_score_engine.py \
+  scripts/test_consolidation_grouper.py \
+  scripts/test_temporal_scoring.py \
+  scripts/test_memory_knowledge_graph.py \
+  scripts/test_streaming_ingestion.py \
+  scripts/test_multimodal_memory.py -v
+```
+
+---
+
+## Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `OPENCLAW_MEMORY_DSN` | `dbname=openclaw_memory` | PostgreSQL connection string |
+| `QDRANT_HOST` | `localhost` | Qdrant server host |
+| `QDRANT_PORT` | `6333` | Qdrant server port |
+| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
+| `NEO4J_USER` | `neo4j` | Neo4j username |
+| `NEO4J_PASSWORD` | `neo4jpassword` | Neo4j password |
+| `OPENCLAW_RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model |
+| `OPENCLAW_RERANK_CAP` | `20` | Max items to cross-encoder rerank |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
