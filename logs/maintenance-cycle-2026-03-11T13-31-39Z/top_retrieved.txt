@@ -1,4 +1,0 @@
-=== TOP RETRIEVED ITEMS ===
-
-mem-90322abb68e1: selected=16 useful=0 bad=0
-canon-browser-0001: selected=4 useful=2 bad=0

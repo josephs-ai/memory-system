@@ -57,3 +57,19 @@ health/*.json
 
 # Backup files
 README.md.bak
+
+# Backup directories
+control_panel_final_backup/
+control_panel_working_backup/
+control-panel/
+
+# Bak files
+*.bak
+
+# Runtime config (contains local paths)
+# config.json is tracked but should be templated
+control_panel/control_panel_config.json
+
+# Large benchmark datasets (>100MB, download separately)
+benchmarks/longmemeval/longmemeval_s.json
+benchmarks/longmemeval/longmemeval_s_cleaned.json

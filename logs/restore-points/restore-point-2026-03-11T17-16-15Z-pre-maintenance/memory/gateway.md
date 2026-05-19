@@ -1,5 +1,0 @@
-- OpenClaw gateway runs on 127.0.0.1:18789
-- Nginx reverse proxy runs on port 80
-- Gateway bind mode is loopback
-- Gateway auth mode is token
-- Gateway is the main control node for the OpenClaw setup

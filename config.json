@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sourceMemoryRoot": "/home/joseph-ding/.openclaw/workspace",
+  "sourceMemoryRoot": "${OPENCLAW_WORKSPACE:-~/.openclaw/workspace}",
   "sourceFiles": [
     "MEMORY.md",
     "memory/browser.md",
@@ -16,8 +16,8 @@
   ],
   "chunkTargetWords": 100,
   "chunkOverlapWords": 25,
-  "indexDb": "/home/joseph-ding/.openclaw/workspace/.memory-index/memory.sqlite",
-  "chunksDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/chunks",
-  "embeddingsDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/embeddings",
-  "logsDir": "/home/joseph-ding/.openclaw/workspace/.memory-index/logs"
+  "indexDb": "./memory.sqlite",
+  "chunksDir": "./chunks",
+  "embeddingsDir": "./embeddings",
+  "logsDir": "./logs"
 }

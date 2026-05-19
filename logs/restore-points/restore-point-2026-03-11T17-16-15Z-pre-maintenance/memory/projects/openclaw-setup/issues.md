@@ -1,3 +1,0 @@
-- Gateway status output can look inconsistent even while the gateway is active.
-- Ranking still needs tuning so browser queries prefer browser memory and gateway queries prefer architecture memory.
-- Daily and broad project files can still compete too strongly with dedicated technical memory files.

@@ -1,3 +1,0 @@
-=== LOW UTILITY RETRIEVALS ===
-
-id=canon-browser-0002 useful=0 bad=1

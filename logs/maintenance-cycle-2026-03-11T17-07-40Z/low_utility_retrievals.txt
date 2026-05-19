@@ -1,4 +1,0 @@
-=== LOW-UTILITY / OFTEN-LOSING ITEMS ===
-
-canon-browser-0002: considered=4 selected=0 useful=0 bad=0 status=active avg_score=123.8
-canon-browser-old-0001: considered=4 selected=0 useful=0 bad=0 status=superseded avg_score=110.0

@@ -172,6 +172,35 @@ def main():
     any_output = False
 
     for item in items:
+        # Normalize schema drift between extraction output and routing expectations:
+        # 1. id: extraction produces candidate_id, routing expects id
+        if not item.get("id") and item.get("candidate_id"):
+            item["id"] = item["candidate_id"]
+        # 2. confidence: extraction produces candidate_score (0-10), routing expects confidence (0-1)
+        if item.get("confidence") is None and item.get("candidate_score") is not None:
+            item["confidence"] = min(float(item["candidate_score"]) / 10.0, 1.0)
+        # 3. importance: derive from durability_class + impact_level if missing
+        if item.get("importance") is None:
+            durability = (item.get("durability_class") or "").lower()
+            impact = (item.get("impact_level") or "").lower()
+            dur_map = {"durable": 0.9, "stable": 0.8, "candidate": 0.6, "ephemeral": 0.2}
+            imp_map = {"critical": 0.95, "high": 0.85, "medium": 0.65, "low": 0.4}
+            dur_score = dur_map.get(durability, 0.5)
+            imp_score = imp_map.get(impact, 0.5)
+            item["importance"] = round((dur_score + imp_score) / 2.0, 3)
+        # 4. scope: extraction uses scope_envelope.scope_type, routing expects flat scope
+        if item.get("scope") is None:
+            scope_env = item.get("scope_envelope") or {}
+            raw = scope_env.get("raw") or {}
+            item["scope"] = raw.get("scope") or scope_env.get("scope_type") or "stable"
+        # 5. text: routing rules check text/normalized_text/claim_text — ensure text is set
+        if not item.get("text") and item.get("normalized_text"):
+            item["text"] = item["normalized_text"]
+        elif not item.get("text") and item.get("raw_text"):
+            item["text"] = item["raw_text"]
+        # 6. memory_type: routing checks memory_type, extraction uses claim_type
+        if not item.get("memory_type") and item.get("claim_type"):
+            item["memory_type"] = item["claim_type"]
         item_id = item.get("id")
 
         if item_id and queue_item_exists_anywhere(item_id):

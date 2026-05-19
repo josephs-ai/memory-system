@@ -1,8 +1,0 @@
-=== PROMOTION CANDIDATES ===
-
-id=mem-eb234ea19e1ff5766b82a0bbc41747b3789ef737
-memory_type=decision scope=stable
-confidence=0.92 importance=0.9
-entity=checkpoint_pipeline property=stable_promotion_policy value=manual_approval_required
-suggested_route=auto
-text=Canonical registry now requires explicit approval for high-importance stable items.

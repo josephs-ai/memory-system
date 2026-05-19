@@ -70,4 +70,4 @@ def test_extract_updates_is_now_structural_wrapper(tmp_path: Path):
     row = rows[0]
     assert row["claim_type"] == "rule"
     assert row["scope_envelope"]["scope_type"] == "pipeline"
-    assert row["durability_class"] == "candidate"
+    assert row["durability_class"] == "durable_eligible"

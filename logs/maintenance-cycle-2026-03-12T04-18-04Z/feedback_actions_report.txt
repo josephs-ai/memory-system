@@ -1,4 +1,0 @@
-=== FEEDBACK-DRIVEN ACTION SUGGESTIONS ===
-
-KEEP_AS_IS id=canon-browser-0001 status=active selected=5 useful=3 bad=0 text=Native browser tool access may be restricted in-session, but browser control still works through openclaw browser CLI against the forward...
-ARCHIVE_CANDIDATE id=canon-browser-old-0001 status=superseded considered=4 selected=0 avg_score=110.0 text=Native browser tool access is unavailable in-session.

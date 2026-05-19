@@ -1,4 +1,0 @@
-=== FEEDBACK-DRIVEN ACTION SUGGESTIONS ===
-
-KEEP_AS_IS id=canon-browser-0001 status=active selected=4 useful=2 bad=0
-ARCHIVE_CANDIDATE id=canon-browser-old-0001 status=superseded considered=4 selected=0 avg_score=110.0

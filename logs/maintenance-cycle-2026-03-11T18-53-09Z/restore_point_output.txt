@@ -1,2 +1,0 @@
-RESTORE_POINT_CREATED
-path=/home/joseph-ding/.openclaw/workspace/.memory-index/logs/restore-points/restore-point-2026-03-11T18-53-09Z-pre-maintenance

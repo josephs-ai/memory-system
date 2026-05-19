@@ -1,3 +1,0 @@
-mode=forced
-MAINTENANCE_CYCLE_COMPLETE
-log_dir=/home/joseph-ding/.openclaw/workspace/.memory-index/logs/maintenance-cycle-2026-03-11T16-19-48Z
