@@ -211,7 +211,7 @@ def main():
     print(f"agent={args.agent}")
     print(f"interval_seconds={interval}")
     print(f"files={len(bundle)}")
- 
+
     print(f"trigger={agent_state.get('refresh_trigger')}")
 
 

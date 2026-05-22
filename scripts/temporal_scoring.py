@@ -22,7 +22,6 @@ import logging
 import math
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Any
 
 LOGGER = logging.getLogger("openclaw.temporal_scoring")
 

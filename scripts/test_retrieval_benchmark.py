@@ -10,8 +10,6 @@ Covers:
 - Edge cases: empty results, no relevant items, perfect retrieval
 """
 
-import json
-import math
 import sys
 from pathlib import Path
 
@@ -33,7 +31,6 @@ from retrieval_benchmark import (
     make_golden_entry,
     make_expected_item,
     generate_report,
-    REGRESSION_THRESHOLD,
 )
 
 

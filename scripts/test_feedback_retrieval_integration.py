@@ -8,8 +8,6 @@ scripts accept query_text and query_type.
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import json
 
 import pytest
 

@@ -14,7 +14,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from memory_db import (
     fetch_memory_items,
     upsert_memory_item,
-    upsert_inbox,
     close_pool,
     get_conn,
 )

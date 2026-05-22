@@ -22,11 +22,8 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Any
 
 import psycopg
 

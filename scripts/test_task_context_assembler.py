@@ -29,10 +29,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from task_context_assembler import TaskContextAssembler, TokenBudget, TaskContext
-from parse_code_ast import parse_file, upsert_chunks, remove_stale_chunks
+from task_context_assembler import TaskContextAssembler, TokenBudget
+from parse_code_ast import parse_file, upsert_chunks
 from parse_code_cpp import CppParser
-from base_code_parser import BaseCodeParser
 
 DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
 

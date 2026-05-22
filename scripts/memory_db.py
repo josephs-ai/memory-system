@@ -6,7 +6,6 @@ import atexit
 import os
 from pathlib import Path
 
-import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 

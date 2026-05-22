@@ -6,7 +6,6 @@ Key functions: load_json, existing_text, append_block_if_new, normalize_summary_
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent

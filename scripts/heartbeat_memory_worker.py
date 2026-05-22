@@ -344,10 +344,9 @@ def worker_loop(once: bool = False) -> None:
         if trigger_row:
             payload = trigger_row.get("payload") or {}
             LOGGER.info(
-                "checkpoint_trigger type=timer reason=interval_%ss tuning_reason=%s delta_count=%s",
+                "checkpoint_trigger type=timer reason=interval_%ss tuning_reason=%s",
                 interval,
                 tuning.get("reason"),
-                delta["count"],
             )
             ok = maybe_run_checkpoint(
                 trigger_row.get("source_type", "trigger"),

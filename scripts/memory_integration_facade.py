@@ -22,21 +22,20 @@ returning safe defaults on failure).
 
 Usage:
     from memory_integration_facade import context_for_builder, classify_build_output
-    
+
     # In packet_builder.py, for the Builder role:
     builder_context = context_for_builder(
         task="implement dash ability",
         target_qualified_name="MyCharacter.AMyCharacter.Dash",
     )
     packet["memory_context_block"] = builder_context["prompt_block"]
-    
+
     # In unreal_delivery_loop.py, after build:
     errors = classify_build_output(build_log_text)
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys

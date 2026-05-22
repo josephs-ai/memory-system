@@ -26,9 +26,8 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 LOGGER = logging.getLogger("openclaw.memory_knowledge_graph")
 
@@ -366,7 +365,7 @@ def main():
         links = detect_all_links(items)
         print(f"Detected {len(links)} links from {len(items)} items")
         for rel_type in ALL_RELATIONSHIP_TYPES:
-            count = sum(1 for l in links if l["relationship"] == rel_type)
+            count = sum(1 for lnk in links if lnk["relationship"] == rel_type)
             if count:
                 print(f"  {rel_type}: {count}")
 

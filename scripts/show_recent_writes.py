@@ -7,7 +7,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import timezone
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:

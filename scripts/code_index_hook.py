@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -88,7 +87,7 @@ def reparse_files(
 
     Returns stats dict with parsed/upserted/removed/skipped/errors counts.
     """
-    from parse_code_ast import process_file, parse_file, discover_python_files
+    from parse_code_ast import process_file, parse_file
 
     stats = {"parsed": 0, "upserted": 0, "removed": 0, "skipped": 0, "errors": 0, "files": 0}
 

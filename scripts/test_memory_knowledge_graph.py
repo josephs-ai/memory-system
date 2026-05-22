@@ -14,7 +14,6 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -142,7 +141,7 @@ class TestDetectTypeBasedLinks:
         ]
         links = detect_type_based_links(items)
         assert len(links) >= 1
-        rels = {l["relationship"] for l in links}
+        rels = {lnk["relationship"] for lnk in links}
         assert REL_CAUSED_BY in rels or REL_RELATES_TO in rels
 
     def test_fact_supports_rule(self):
@@ -151,7 +150,7 @@ class TestDetectTypeBasedLinks:
             _make_item("rule", memory_type="rule", scope="proj", age_hours=6),
         ]
         links = detect_type_based_links(items)
-        assert any(l["relationship"] == REL_SUPPORTS for l in links)
+        assert any(lnk["relationship"] == REL_SUPPORTS for lnk in links)
 
     def test_too_far_apart_no_link(self):
         """Items more than TEMPORAL_PROXIMITY_HOURS apart → no type-based link."""
@@ -188,8 +187,8 @@ class TestDetectAllLinks:
         # Should have links from multiple strategies
         assert len(links) >= 1
         # Explicit supersedes should win with confidence=1.0
-        supersedes_links = [l for l in links if l["relationship"] == REL_SUPERSEDES]
-        assert any(l["confidence"] == 1.0 for l in supersedes_links)
+        supersedes_links = [lnk for lnk in links if lnk["relationship"] == REL_SUPERSEDES]
+        assert any(lnk["confidence"] == 1.0 for lnk in supersedes_links)
 
     def test_dedup_keeps_highest_confidence(self):
         items = [
@@ -199,7 +198,7 @@ class TestDetectAllLinks:
         ]
         links = detect_all_links(items)
         # Explicit supersedes (conf=1.0) should beat entity-based (conf=0.85)
-        supersedes = [l for l in links if l["source_id"] == "a" and l["target_id"] == "b" and l["relationship"] == REL_SUPERSEDES]
+        supersedes = [lnk for lnk in links if lnk["source_id"] == "a" and lnk["target_id"] == "b" and lnk["relationship"] == REL_SUPERSEDES]
         assert len(supersedes) == 1
         assert supersedes[0]["confidence"] == 1.0
 

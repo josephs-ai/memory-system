@@ -60,7 +60,7 @@ class ConflictDetector:
                     if current_scope != "global" and durable_scope == "global":
                         return ConflictState.SCOPED_OVERRIDE
                     return ConflictState.UNRESOLVED_CONTRADICTION
-        
+
         return ConflictState.NO_CONFLICT
 
 class PromotionPipeline:
@@ -77,15 +77,15 @@ class PromotionPipeline:
 
         for item in memory_items:
             category = self.classifier.classify(item, {"scope": current_scope})
-            
+
             if category in [MemoryCategory.DURABLE, MemoryCategory.SCOPED_DURABLE, MemoryCategory.CANDIDATE]:
                 conflict_state = self.conflict_detector.detect_conflict(item, current_scope)
-                
+
                 if conflict_state == ConflictState.NO_CONFLICT or conflict_state == ConflictState.SCOPED_OVERRIDE:
                     results["promoted"].append({"item": item, "category": category, "resolution": conflict_state})
                 else:
                     results["conflicts"].append({"item": item, "category": category, "resolution": conflict_state})
             else:
                 results["ephemeral"].append(item)
-                
+
         return results

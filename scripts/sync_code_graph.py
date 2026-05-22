@@ -27,11 +27,8 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import logging
 import os
-import sys
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -518,7 +515,7 @@ def main():
                         help="Batch size for Cypher operations")
     parser.add_argument("--force", action="store_true",
                         help="Re-sync all files regardless of state")
-    args = parser.parse_args()
+    parser.parse_args()
 
     conn = psycopg.connect(DB_DSN)
     driver = get_neo4j_driver()

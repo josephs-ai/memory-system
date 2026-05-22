@@ -15,7 +15,6 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -26,11 +25,7 @@ from consolidation_grouper import (
     _iso_week,
     _iso_month,
     _iso_day,
-    DAILY_MIN_AGE,
-    WEEKLY_MIN_AGE,
-    MONTHLY_MIN_AGE,
     MIN_GROUP_SIZE,
-    EXCLUDED_TYPES,
 )
 
 

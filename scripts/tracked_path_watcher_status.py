@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from checkpoint_db import close_pool, get_state
 from heartbeat_manager_common import MEMORY_INDEX_DIR, pid_alive, read_json

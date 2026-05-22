@@ -18,21 +18,21 @@ class InheritanceRules:
         This is an additive improvement, preserving original parent state while seeding the child planner.
         """
         child_memory = []
-        
+
         for item in parent_memory:
             item_scope = item.get("scope", "global")
             item_tags = item.get("tags", [])
-            
+
             # Rule 1: Always inherit global durable memory
             if item_scope == "global" and item.get("category") == "Durable":
                 child_memory.append(self._clone_item_for_child(item))
                 continue
-                
+
             # Rule 2: Inherit memory specifically scoped to this child or matching task requirements
             if item_scope == child_scope or any(req in item_tags for req in task_requirements):
                 child_memory.append(self._clone_item_for_child(item))
                 continue
-                
+
         return child_memory
 
     def _clone_item_for_child(self, item: Dict[str, Any]) -> Dict[str, Any]:

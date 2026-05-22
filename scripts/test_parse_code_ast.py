@@ -19,10 +19,8 @@ Covers:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
-import tempfile
 import textwrap
 
 import psycopg
@@ -38,7 +36,6 @@ from parse_code_ast import (
     parse_file,
     _file_hash,
     _extract_imports,
-    _get_decorator_names,
     discover_python_files,
     process_file,
     upsert_chunks,

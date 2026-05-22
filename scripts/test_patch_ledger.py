@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import os
 import sys
-import textwrap
 
 import psycopg
 import pytest
@@ -32,7 +31,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from patch_ledger import PatchLedger, PatchRecord, RollbackResult
+from patch_ledger import PatchLedger
 from parse_code_ast import parse_file, upsert_chunks, remove_stale_chunks
 
 DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
@@ -120,7 +119,7 @@ class TestRecording:
         chunks = parse_file(str(fp), fp.read_text())
         upsert_chunks(db_conn, chunks)
 
-        pid = ledger.record_patch(
+        ledger.record_patch(
             step_id="test-rec-002",
             file_path=str(fp),
             content_after="def foo(): return 42\ndef bar(): pass\n",
@@ -138,7 +137,7 @@ class TestRecording:
         fp = test_dir / "to_delete.py"
         fp.write_text("def goodbye(): pass\n")
 
-        pid = ledger.record_patch(
+        ledger.record_patch(
             step_id="test-rec-003",
             file_path=str(fp),
             content_after=None,
@@ -225,7 +224,7 @@ class TestRollback:
             operation="create",
         )
 
-        result = ledger.rollback_step(
+        ledger.rollback_step(
             "test-rb-002",
             reparse=False, reembed=False, regraph=False,
         )
@@ -247,7 +246,7 @@ class TestRollback:
         fp.unlink()
         assert not fp.exists()
 
-        result = ledger.rollback_step(
+        ledger.rollback_step(
             "test-rb-003",
             reparse=False, reembed=False, regraph=False,
         )

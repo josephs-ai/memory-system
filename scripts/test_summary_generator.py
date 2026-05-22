@@ -13,9 +13,7 @@ Covers:
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -27,8 +25,6 @@ from summary_generator import (
     generate_summary_text,
     create_summary_item,
     consolidate_group,
-    MAX_REPRESENTATIVE_ITEMS,
-    MAX_ITEM_CHARS,
 )
 
 

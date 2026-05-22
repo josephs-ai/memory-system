@@ -206,7 +206,7 @@ class TestTokenBudget:
         result = process_automation_log(ALL_PASS_LOG, resolve_chunks=False, link_to_ledger=False)
         block = result["tester_block"]
         # Passing tests should be a single compact line
-        pass_lines = [l for l in block.split("\n") if "Passed" in l]
+        pass_lines = [line for line in block.split("\n") if "Passed" in line]
         assert len(pass_lines) <= 1
 
 

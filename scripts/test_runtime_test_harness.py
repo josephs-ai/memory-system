@@ -32,9 +32,7 @@ if SCRIPT_DIR not in sys.path:
 from runtime_test_harness import (
     TestAssertion,
     TestResult,
-    TestRunResult,
     TestSpec,
-    TestSuiteResult,
     format_for_context,
     generate_test_cpp,
     parse_test_log,

@@ -31,7 +31,6 @@ Features:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
 import sys

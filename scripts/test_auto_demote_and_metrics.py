@@ -9,11 +9,10 @@ Covers:
 - Edge cases: no feedback, all-useful, all-bad, NULL timestamps
 """
 
-import json
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,8 +23,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from auto_demote_bad_items import (
     scan_demotion_candidates,
     generate_shortlist_artifact,
-    DEFAULT_MIN_BAD,
-    DEFAULT_MIN_QUERIES,
 )
 from retrieval_metrics import compute_aggregate_metrics
 
@@ -43,7 +40,6 @@ def _mock_conn_with_queries(query_results: dict):
     _call_count = [0]
     _stored_results = [[]]
 
-    original_execute = mock_cur.execute
 
     def fake_execute(sql, params=None):
         for substring, rows in query_results.items():
@@ -98,7 +94,7 @@ class TestScanDemotionCandidates:
 
     def test_net_positive_item_excluded(self):
         """Items with more useful than bad should not appear."""
-        now = datetime.now(timezone.utc)
+        datetime.now(timezone.utc)
         # The SQL WHERE clause filters bad_count > useful_count
         # So a net-positive item won't be returned by the query
         conn = _mock_conn_with_queries({

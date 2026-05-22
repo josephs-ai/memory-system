@@ -4,19 +4,15 @@ Tests for streaming_ingestion.py (P5: Streaming Ingestion).
 
 import sys
 import threading
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from streaming_ingestion import (
-    MemoryEvent, EventType, EventBus, StreamProcessor,
-    create_streaming_pipeline,
+    MemoryEvent, EventType, EventBus, create_streaming_pipeline,
 )
 
 

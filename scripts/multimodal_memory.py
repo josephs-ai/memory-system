@@ -22,13 +22,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 LOGGER = logging.getLogger("openclaw.multimodal_memory")
 

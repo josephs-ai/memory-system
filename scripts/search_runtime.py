@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
 
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from extract_memory_fields import extract_fields
 from graph_store_neo4j import get_neo4j_driver
-from memory_db import close_pool, hybrid_search_memory_items
+from memory_db import hybrid_search_memory_items
 from vector_store_qdrant import search_memory_vectors
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"

@@ -32,7 +32,6 @@ from memory_integration_facade import (
     parse_test_results,
     record_file_change,
     rollback_step,
-    update_after_parse,
 )
 
 DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")

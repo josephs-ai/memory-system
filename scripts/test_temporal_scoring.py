@@ -15,7 +15,6 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -30,7 +29,6 @@ from temporal_scoring import (
     compute_temporal_boost_batch,
     RECENCY_WEIGHT,
     STALENESS_PENALTY,
-    STALENESS_ONSET_DAYS,
     TEMPORAL_QUERY_BOOST,
 )
 

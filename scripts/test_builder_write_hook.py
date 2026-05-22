@@ -119,7 +119,7 @@ class TestAfterWrite:
     def test_hash_skip_unchanged(self, py_file, db_conn):
         # First write — will parse
         before_write("bwh-test-013", str(py_file))
-        r1 = after_write("bwh-test-013", str(py_file), force_reparse=True)
+        after_write("bwh-test-013", str(py_file), force_reparse=True)
 
         # Second write with same content — should skip
         before_write("bwh-test-014", str(py_file))

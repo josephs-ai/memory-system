@@ -15,7 +15,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,14 +24,6 @@ from feedback_score_engine import (
     feedback_boost,
     feedback_boost_batch,
     _compute_weighted_sum,
-    _cold_start_factor,
-    USEFUL_WEIGHT,
-    BAD_WEIGHT,
-    MAX_BOOST,
-    MIN_BOOST,
-    TYPED_COLD_START,
-    TYPED_BLEND_WEIGHT,
-    COLD_START_DAMPING,
 )
 
 

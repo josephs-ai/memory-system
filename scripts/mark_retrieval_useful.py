@@ -4,7 +4,6 @@ Mark retrieval results as useful for the feedback loop.
 Key functions: now_iso, append_log, main
 """
 import argparse
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path

@@ -18,11 +18,11 @@ from memory_db import fetch_memory_items, upsert_memory_items, close_pool
 
 def compact_memories():
     items = fetch_memory_items(["active"])
-    
+
     # Filter for durable/reinforced that are eligible for compaction
     candidates = [
-        i for i in items 
-        if i.get("lifecycle_state") in ("durable", "reinforced") 
+        i for i in items
+        if i.get("lifecycle_state") in ("durable", "reinforced")
         and i.get("retrieval_eligibility") in ("normal", "always")
         and i.get("memory_type") in ("fact", "observation", "rule", "architecture_rule", "decision", "lesson_learned")
     ]
@@ -35,30 +35,30 @@ def compact_memories():
         entity = item.get("entity") or ""
         prop = item.get("property") or ""
         tags = tuple(sorted(item.get("tags") or []))
-        
+
         # Only group if we have meaningful structural fields to group on
         if entity and prop:
             groups[(scope, mtype, entity, prop, tags)].append(item)
 
     updates = []
     compacted_count = 0
-    
+
     for key, group_items in groups.items():
         # Only compact if there are multiple granular items in the exact same structural bucket
         if len(group_items) > 1:
             scope, mtype, entity, prop, tags = key
-            
+
             # Sort by ID for deterministic combination
             group_items.sort(key=lambda x: x.get("id", ""))
-            
+
             combined_text = f"Compacted {mtype} regarding {entity} {prop}:\n"
             for i in group_items:
                 combined_text += f"- {i.get('text', '')}\n"
-                
+
             new_id = f"mem-comp-{hashlib.sha1(combined_text.encode('utf-8')).hexdigest()[:12]}"
-            
-            now_str = datetime.now(timezone.utc).isoformat()
-            
+
+            datetime.now(timezone.utc).isoformat()
+
             new_item = {
                 "id": new_id,
                 "text": combined_text.strip(),
@@ -76,16 +76,16 @@ def compact_memories():
                 "source_agent": "system_compaction",
                 "source_session": "compaction_cycle",
             }
-            
+
             updates.append(new_item)
             compacted_count += 1
-            
+
             for old in group_items:
                 old["lifecycle_state"] = "archived"
                 old["retrieval_eligibility"] = "suppressed"
                 old["supersedes"] = new_id
                 updates.append(old)
-                
+
     if updates:
         upsert_memory_items(updates)
         print(f"Compacted {compacted_count} groups. Total DB upserts (new items + archived originals): {len(updates)}")

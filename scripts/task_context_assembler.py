@@ -35,7 +35,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -343,7 +343,7 @@ class TaskContextAssembler:
         For C++: prefer .h/.hpp files over .cpp for dependencies.
         For Python: include the module-level signatures.
         """
-        imports = chunk.get("imports") or []
+        chunk.get("imports") or []
         file_path = chunk.get("file_path", "")
 
         # Also get callees to find their source files
@@ -555,7 +555,7 @@ class TaskContextAssembler:
     def _add_import_context(self, ctx: TaskContext, chunk: dict) -> None:
         """Add import/include information for the target file."""
         file_path = chunk.get("file_path", "")
-        module = chunk.get("module_name", "")
+        chunk.get("module_name", "")
 
         # Get the module chunk which has the imports list
         with self._conn.cursor() as cur:

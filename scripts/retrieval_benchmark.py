@@ -27,12 +27,10 @@ import hashlib
 import json
 import logging
 import math
-import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 LOGGER = logging.getLogger("openclaw.retrieval_benchmark")
 

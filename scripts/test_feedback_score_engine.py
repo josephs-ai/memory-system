@@ -10,11 +10,10 @@ Tests cover:
 - Clamping behavior
 """
 
-import math
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 

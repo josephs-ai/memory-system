@@ -11,7 +11,6 @@ import os
 from contextlib import contextmanager
 from typing import Any
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -103,9 +102,9 @@ def ensure_checkpoint_tables() -> None:
                 """
             )
         conn.commit()
-   
+
     mark_stale_processing_checkpoints()
-    
+
     ensure_trigger_tables()
 
 def mark_stale_processing_checkpoints(max_age_seconds: int = STALE_PROCESSING_SECONDS) -> int:

@@ -34,8 +34,6 @@ import argparse
 import logging
 import os
 import re
-import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -289,7 +287,7 @@ def find_semantic_matches(
         # Using PostgreSQL pgvector cosine distance
         placeholders = ",".join(["%s"] * len(mem_ids))
         cur.execute(f"""
-            SELECT 
+            SELECT
                 mie.memory_id,
                 cc.qualified_name,
                 cc.chunk_type,

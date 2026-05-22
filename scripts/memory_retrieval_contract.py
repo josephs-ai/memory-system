@@ -2,9 +2,9 @@
 Contract/interface definitions for memory retrieval —
 defines expected inputs, outputs, and guarantees of the search pipeline.
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from pydantic import BaseModel, Field
-from memory_routing_models import WorkItemMemoryMetadata, MemoryScopeLevel
+from memory_routing_models import WorkItemMemoryMetadata
 
 class MemoryPack(BaseModel):
     """
@@ -30,7 +30,7 @@ def _process_refs(pack: MemoryPack, refs: List[Dict[str, Any]], scope: str, role
         # Simplistic mapping based on 'category' or 'type' key in the ref dict
         category = ref.get("category")
         content = ref.get("content", "")
-        
+
         # Example of role-aware filtering: if a ref is tagged for a specific role and it doesn't match, skip.
         if "target_role" in ref and ref["target_role"] != role and ref["target_role"] != "all":
             continue
@@ -67,7 +67,7 @@ def build_memory_pack(
 ) -> MemoryPack:
     """
     Implements Deliverable 2 (Memory Retrieval Contract) and Feature B (Role-aware Memory Pack Builder).
-    
+
     Adheres strictly to the retrieval order:
     1. Global (Project)
     2. Subproject
@@ -79,13 +79,13 @@ def build_memory_pack(
 
     # 1. Global (Project)
     _process_refs(pack, project_refs, scope="global", role=role)
-    
+
     # 2. Subproject
     _process_refs(pack, subproject_refs, scope="subproject", role=role)
-    
+
     # 3. Parent
     _process_refs(pack, parent_refs, scope="parent", role=role)
-    
+
     # 4. Current (Work Item)
     # Extracting from work_item's inherited, promoted, and local refs (mocking dict structure for consistency)
     current_refs = []
@@ -95,7 +95,7 @@ def build_memory_pack(
             "content": f"[{mem_ref.memory_id}] Reason: {mem_ref.reason_for_selection}"
         })
     _process_refs(pack, current_refs, scope="current", role=role)
-    
+
     # 5. Session-local
     # Not explicitly provided in signature, handled internally or omitted.
     return pack

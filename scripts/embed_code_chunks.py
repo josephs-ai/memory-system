@@ -23,17 +23,13 @@ Features:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
-import sys
 import uuid
-from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import psycopg
 import torch
-from psycopg.types.json import Jsonb
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer

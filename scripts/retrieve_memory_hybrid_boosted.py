@@ -3,7 +3,12 @@ Memory system utility: retrieve memory hybrid boosted.
 
 Key functions: tok, boost
 """
-import os, json, sqlite3, argparse, numpy as np, re
+import os
+import json
+import sqlite3
+import argparse
+import numpy as np
+import re
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 

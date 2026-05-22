@@ -5,10 +5,8 @@ Tests for multimodal_memory.py (P6: Multi-Modal Memory).
 import json
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:

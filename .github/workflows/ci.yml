@@ -76,4 +76,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check scripts/ --select E,F,W --ignore E501
+      - run: ruff check scripts/ --select E,F,W --ignore E501,E402

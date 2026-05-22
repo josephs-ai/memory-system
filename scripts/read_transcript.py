@@ -1,7 +1,7 @@
 """
 Read Transcript — utility for the OpenClaw memory system.
 
-Key functions: find_latest_session_for_agent, list_latest_sessions_all_agents, find_latest_session_for_agent, read_events
+Key functions: find_latest_session_for_agent, list_latest_sessions_all_agents, read_events
 """
 import json
 import argparse
@@ -11,29 +11,6 @@ from collections import Counter
 OPENCLAW_ROOT = Path.home() / ".openclaw"
 AGENTS_DIR = OPENCLAW_ROOT / "agents"
 
-def find_latest_session_for_agent(agent_name: str):
-    sessions_dir = AGENTS_DIR / agent_name / "sessions"
-    sessions_json = sessions_dir / "sessions.json"
-
-    if not sessions_json.exists():
-        return None
-
-    try:
-        data = json.loads(sessions_json.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    latest = None
-    latest_ts = -1
-
-    for _, meta in data.items():
-        session_file = meta.get("sessionFile")
-        updated_at = meta.get("updatedAt", 0)
-        if session_file and updated_at > latest_ts:
-            latest = Path(session_file)
-            latest_ts = updated_at
-
-    return latest
 
 def list_latest_sessions_all_agents():
     results = []
