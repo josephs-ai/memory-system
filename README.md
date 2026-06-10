@@ -144,6 +144,30 @@ python scripts/retrieval_benchmark.py report  # Generate report
 
 Tracks: Precision@K, Recall@K, MRR, nDCG. Alerts on >5% regression.
 
+#### LongMemEval Snapshot (May 2026)
+
+From `benchmarks/longmemeval/results/longmemeval_v3_longmemeval_s_20260515_133527.json`:
+
+- **F1:** `0.853`
+- **Exact Match (EM):** `0.72`
+- **Contains:** `0.88`
+- **Retrieval Hit:** `0.98`
+- **Avg Retrieve Latency:** `66.7 ms`
+
+This is the current reference run used internally to validate retrieval quality after major ingestion/routing/indexing changes.
+
+#### How this differs from “memory-place” style memory stores
+
+Many memory layers focus on storing snippets and retrieving by semantic similarity alone. This system is designed as a full **memory operating system**:
+
+- **Hybrid retrieval** (FTS + vector + reranking), not vector-only
+- **Lifecycle-aware memory states** (`candidate`, `durable`, `superseded`, `consolidated`, `discarded`)
+- **Code-aware context retrieval** (AST parsing + dependency graph + memory linking)
+- **Self-improving retrieval loop** (feedback-weighted scoring)
+- **Built-in benchmark + regression gate** in the repo itself
+
+If you compare systems, compare them on the same benchmark dataset and scoring pipeline. This repo includes both so results are reproducible.
+
 ### 📝 Progressive Summarization (P2)
 Old memories are automatically consolidated — daily summaries after 7 days, weekly after 30, monthly after 90. Originals are archived, not deleted.
 
