@@ -156,7 +156,7 @@ From `benchmarks/longmemeval/results/longmemeval_v3_longmemeval_s_20260515_13352
 
 This is the current reference run used internally to validate retrieval quality after major ingestion/routing/indexing changes.
 
-#### How this differs from “memory-place” style memory stores
+#### How this differs from mem-place style memory stores
 
 Many memory layers focus on storing snippets and retrieving by semantic similarity alone. This system is designed as a full **memory operating system**:
 
