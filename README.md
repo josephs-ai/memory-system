@@ -196,6 +196,51 @@ candidate → durable → [superseded | consolidated | discarded]
 
 ---
 
+## ✅ Recent Reliability Updates (June 2026)
+
+### Memory ingestion + context retrieval recovery
+
+- Fixed a 12-day ingestion outage caused by extractor/router schema drift (`candidate_id` vs `id`, score/field mismatches).
+- Rewrote `structured_memory_extractor.py` to:
+  - parse real text from JSON envelopes (skip tool/signature/thinking noise),
+  - extract atomic claims,
+  - apply deterministic confidence scoring (no LLM dependency).
+- Restored backlog processing via `checkpoint_all_agents.py` and re-synced vectors.
+- Current parity target is maintained between active PostgreSQL items and Qdrant vectors.
+
+### Checkpoint pipeline hardening (v1.5)
+
+- `extract_chunk_updates.py`
+  - Added chunk-level extraction cache with content hash keys,
+  - cache versioning/fingerprint,
+  - `--ignore-cache`,
+  - atomic cache writes,
+  - bounded cache hygiene (`CACHE_MAX_ENTRIES`).
+- `checkpoint_agent.py`
+  - Stronger cursor semantics (identity + newline-safe commit boundaries),
+  - replay-window safety to prevent temporary extractor misses from becoming permanent data loss,
+  - safer stale chunk pruning strategy.
+
+### Neo4j relationship validation
+
+- Verified code graph topology is populated (Function/CodeFile/Class/Module + IMPORTS/DEFINES/CALLS/etc).
+- Re-ran memory→code linking (`link_memories_to_code.py`) and confirmed `ABOUT_CODE` edges were repopulated after drift.
+
+### SQS stateless tier groundwork
+
+- Implemented and reviewed:
+  - SQS producer/consumer SDK,
+  - embedding worker,
+  - routing layer (`dag` vs `stateless`),
+  - baseline observability stack (CloudWatch alarms + dashboard),
+  - K8s/KEDA manifests with security context and health probes.
+
+> Notes:
+> - Human-in-the-loop (HITL) safety gates remain enforced for legal/publish boundaries.
+> - Additional incrementalization and infra hardening steps continue in follow-on phases.
+
+---
+
 ## Project Structure
 
 ```
