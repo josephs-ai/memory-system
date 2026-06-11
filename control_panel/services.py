@@ -348,6 +348,24 @@ def run_benchmark() -> dict[str, Any]:
 
 def last_benchmark_result() -> dict[str, Any]:
     """Load the last saved benchmark report, if any."""
+    # Try new benchmark suite results first
+    results_dir = MEMORY_INDEX / "benchmarks" / "results"
+    suite_results = {}
+    if results_dir.exists():
+        for name in ["niah", "msc", "hotpotqa", "musique", "crud_rag",
+                      "temporalqa", "contradiction", "fever"]:
+            import glob as _glob
+            files = sorted(_glob.glob(str(results_dir / f"{name}_*.json")))
+            if files:
+                try:
+                    with open(files[-1]) as f:
+                        suite_results[name] = json.load(f)
+                except Exception:
+                    pass
+    if suite_results:
+        return {"suite": suite_results}
+
+    # Fallback to old single-benchmark report
     report_path = MEMORY_INDEX / "health" / "retrieval_benchmark_report.json"
     try:
         if report_path.exists():

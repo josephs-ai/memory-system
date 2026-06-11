@@ -134,9 +134,11 @@ def list_latest_sessions_all_agents():
             rows.append((agent_dir.name, latest))
     return rows
 
-def load_events(path: Path):
+def load_events(path: Path, offset: int = 0):
     events = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        if offset > 0:
+            f.seek(offset)
         for line in f:
             line = line.strip()
             if not line:
@@ -281,8 +283,9 @@ def dehydrate_events(events):
 
     return out
 
-def print_dehydrated(label, pairs):
-    print(f"===== {label} =====")
+def print_dehydrated(label, pairs, no_header=False):
+    if not no_header:
+        print(f"===== {label} =====")
     for role, text in pairs:
         print(f"{role}: {text}")
         print()
@@ -293,12 +296,14 @@ def main():
     parser.add_argument("--file")
     parser.add_argument("--agent")
     parser.add_argument("--all-agents", action="store_true")
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--no-header", action="store_true")
     args = parser.parse_args()
 
     if args.file:
         path = Path(args.file)
-        pairs = dehydrate_events(load_events(path))
-        print_dehydrated(str(path), pairs)
+        pairs = dehydrate_events(load_events(path, args.offset))
+        print_dehydrated(str(path), pairs, args.no_header)
         return
 
     if args.agent:
@@ -306,8 +311,8 @@ def main():
         if not path:
             print(f"No latest session found for agent: {args.agent}")
             return
-        pairs = dehydrate_events(load_events(path))
-        print_dehydrated(f"{args.agent}: {path}", pairs)
+        pairs = dehydrate_events(load_events(path, args.offset))
+        print_dehydrated(f"{args.agent}: {path}", pairs, args.no_header)
         return
 
     if args.all_agents:
@@ -316,8 +321,8 @@ def main():
             print("No sessions found.")
             return
         for agent_name, path in rows:
-            pairs = dehydrate_events(load_events(path))
-            print_dehydrated(f"{agent_name}: {path}", pairs)
+            pairs = dehydrate_events(load_events(path, args.offset))
+            print_dehydrated(f"{agent_name}: {path}", pairs, args.no_header)
         return
 
     print("Use one of: --file PATH | --agent NAME | --all-agents")

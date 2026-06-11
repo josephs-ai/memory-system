@@ -51,9 +51,23 @@ PREFERRED_DEVICE = os.environ.get("OPENCLAW_SEARCH_DEVICE", "auto").lower()
 EMBED_BACKEND = os.environ.get("OPENCLAW_EMBED_BACKEND", "default").lower()
 
 
+class MetadataFilter(BaseModel):
+    """Optional metadata filters to scope search results."""
+    entity: str | None = Field(default=None, description="Filter by entity name (exact match)")
+    property: str | None = Field(default=None, description="Filter by property name (exact match)")
+    session_id: str | None = Field(default=None, description="Filter by source_session (exact match)")
+    source_agent: str | None = Field(default=None, description="Filter by source_agent (exact match)")
+    memory_type: str | None = Field(default=None, description="Filter by memory_type (exact match)")
+    scope: str | None = Field(default=None, description="Filter by scope (exact match)")
+    project_id: str | None = Field(default=None, description="Filter by project_id (exact match)")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum confidence threshold")
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     top_k: int = Field(default=TOP_K, ge=1, le=50)
+    filters: MetadataFilter | None = Field(default=None, description="Metadata filters to scope results")
+    rerank: bool = Field(default=True, description="Whether to apply cross-encoder reranking")
 
 
 class SearchResult(BaseModel):
@@ -173,7 +187,347 @@ async def run_in_executor(executor: ThreadPoolExecutor, fn, *args, **kwargs):
     return await loop.run_in_executor(executor, lambda: fn(*args, **kwargs))
 
 
-async def query_db(app: FastAPI, query: str, query_vec: list[float], limit: int) -> list[dict[str, Any]]:
+def _apply_metadata_filter(rows: list[dict[str, Any]], filters: MetadataFilter | None) -> list[dict[str, Any]]:
+    """Apply metadata filters to a list of result rows (post-retrieval filtering)."""
+    if filters is None:
+        return rows
+
+    filtered = []
+    for row in rows:
+        if filters.entity is not None and str(row.get("entity", "") or "") != filters.entity:
+            continue
+        if filters.property is not None and str(row.get("property", "") or "") != filters.property:
+            continue
+        if filters.session_id is not None and str(row.get("source_session", "") or "") != filters.session_id:
+            continue
+        if filters.source_agent is not None and str(row.get("source_agent", "") or "") != filters.source_agent:
+            continue
+        if filters.memory_type is not None and str(row.get("memory_type", "") or "") != filters.memory_type:
+            continue
+        if filters.scope is not None and str(row.get("scope", "") or "") != filters.scope:
+            continue
+        if filters.project_id is not None and str(row.get("project_id", "") or "") != filters.project_id:
+            continue
+        if filters.min_confidence is not None:
+            conf = float(row.get("confidence", 0) or 0)
+            if conf < filters.min_confidence:
+                continue
+        filtered.append(row)
+
+    return filtered
+
+
+def _build_metadata_sql(filters: MetadataFilter | None) -> tuple[str, list[Any]]:
+    """Build additional SQL WHERE clauses from metadata filters.
+
+    Returns (sql_fragment, params) to append to a query.
+    The sql_fragment starts with ' AND ...' if non-empty.
+    """
+    if filters is None:
+        return "", []
+
+    clauses = []
+    params: list[Any] = []
+
+    if filters.entity is not None:
+        clauses.append("entity = %s")
+        params.append(filters.entity)
+    if filters.property is not None:
+        clauses.append("property = %s")
+        params.append(filters.property)
+    if filters.session_id is not None:
+        clauses.append("source_session = %s")
+        params.append(filters.session_id)
+    if filters.source_agent is not None:
+        clauses.append("source_agent = %s")
+        params.append(filters.source_agent)
+    if filters.memory_type is not None:
+        clauses.append("memory_type = %s")
+        params.append(filters.memory_type)
+    if filters.scope is not None:
+        clauses.append("scope = %s")
+        params.append(filters.scope)
+    if filters.project_id is not None:
+        clauses.append("project_id = %s")
+        params.append(filters.project_id)
+    if filters.min_confidence is not None:
+        clauses.append("COALESCE(confidence, 0) >= %s")
+        params.append(filters.min_confidence)
+
+    if not clauses:
+        return "", []
+
+    return " AND " + " AND ".join(clauses), params
+
+
+def search_memory_items_filtered(
+    query: str,
+    filters: MetadataFilter | None = None,
+    status: str = "active",
+    limit: int = 50,
+    query_embedding: list[float] | None = None,
+) -> list[dict[str, Any]]:
+    """Hybrid search (FTS + vector + structured) with metadata filters in SQL.
+
+    This is the full hybrid scoring query from hybrid_search_memory_items()
+    but with metadata WHERE clauses injected so filtering happens at the DB
+    level rather than post-retrieval.  If query_embedding is not provided,
+    it is computed automatically.
+    """
+    from memory_db import POOL
+
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    # Compute embedding if not provided
+    if query_embedding is None:
+        try:
+            _st = SentenceTransformer(MODEL_NAME)
+            query_embedding = _st.encode(query, normalize_embeddings=True, convert_to_numpy=True).tolist()
+        except Exception:
+            # Fall back to FTS-only if embedding fails
+            return _search_memory_items_filtered_fts_only(query, filters, status, limit)
+
+    extra_sql, extra_params = _build_metadata_sql(filters)
+    vec = "[" + ",".join(str(float(x)) for x in query_embedding) + "]"
+
+    # All positional %s params to avoid psycopg mixed-placeholder errors
+    sql = f"""
+        WITH q AS (
+            SELECT
+                ARRAY(
+                    SELECT qt
+                    FROM unnest(
+                        regexp_split_to_array(
+                            regexp_replace(LOWER(%s), '[^a-z0-9_ ]', ' ', 'g'),
+                            '\\s+'
+                        )
+                    ) AS qt
+                    WHERE qt <> ''
+                      AND length(qt) >= 4
+                      AND qt NOT IN (
+                          'this', 'that', 'with', 'from', 'into', 'they', 'them',
+                          'then', 'than', 'have', 'will', 'would', 'could', 'should',
+                          'there', 'their', 'about', 'because', 'system',
+                          'person', 'does', 'what', 'where', 'love', 'enjoy'
+                      )
+                ) AS qterms,
+                websearch_to_tsquery('english', %s) AS tsq
+        ),
+        scored AS (
+            SELECT
+                m.id, m.text, m.memory_type, m.scope, m.entity, m.property, m.value, m.status,
+                m.confidence, 0.8 as importance, m.freshness_class,
+                m.source_agent, m.source_session, m.source_chunk,
+                m.first_seen, m.last_confirmed, m.supersedes,
+                m.tags, m.notes, m.candidate_id, m.candidate_score, m.candidate_reasons,
+                m.suggested_route, m.target_file, m.target_section,
+                m.sensitivity, m.approved_at, m.approved_by, m.approval_source,
+                m.rejected_at, m.rejected_by, m.rejection_reason, m.rejection_source,
+                m.ranking_bonus, m.ranking_penalty, m.feedback_last_applied_at,
+
+                ts_rank_cd(
+                    to_tsvector(
+                        'english',
+                        COALESCE(m.text, '') || ' ' ||
+                        COALESCE(m.entity, '') || ' ' ||
+                        COALESCE(m.property, '') || ' ' ||
+                        COALESCE(m.value, '') || ' ' ||
+                        COALESCE(m.memory_type, '') || ' ' ||
+                        COALESCE(m.scope, '')
+                    ),
+                    q.tsq
+                ) AS fts_rank,
+
+                1 - (e.embedding <=> %s::vector) AS vector_score,
+
+                (
+                    0.18 * (
+                        SELECT COUNT(*)
+                        FROM unnest(q.qterms) qt2
+                        WHERE qt2 <> ''
+                          AND qt2 = ANY(
+                              regexp_split_to_array(
+                                  regexp_replace(LOWER(COALESCE(m.text, '')), '[^a-z0-9_ ]', ' ', 'g'),
+                                  '\\s+'
+                              )
+                          )
+                    )
+                    +
+                    0.20 * (
+                        SELECT COUNT(*)
+                        FROM unnest(q.qterms) qt2
+                        WHERE qt2 <> ''
+                          AND qt2 = ANY(
+                              regexp_split_to_array(
+                                  regexp_replace(LOWER(COALESCE(m.entity, '')), '[^a-z0-9_ ]', ' ', 'g'),
+                                  '\\s+'
+                              )
+                          )
+                    )
+                    +
+                    0.45 * (
+                        SELECT COUNT(*)
+                        FROM unnest(q.qterms) qt2
+                        WHERE qt2 <> ''
+                          AND qt2 = ANY(
+                              regexp_split_to_array(
+                                  regexp_replace(LOWER(COALESCE(m.property, '')), '[^a-z0-9_ ]', ' ', 'g'),
+                                  '\\s+'
+                              )
+                          )
+                    )
+                    +
+                    0.55 * (
+                        SELECT COUNT(*)
+                        FROM unnest(q.qterms) qt2
+                        WHERE qt2 <> ''
+                          AND qt2 = ANY(
+                              regexp_split_to_array(
+                                  regexp_replace(LOWER(COALESCE(m.value, '')), '[^a-z0-9_ ]', ' ', 'g'),
+                                  '\\s+'
+                              )
+                          )
+                    )
+                ) AS structured_bonus,
+
+                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus
+
+            FROM memory_items m
+            JOIN memory_item_embeddings e ON e.memory_id = m.id
+            CROSS JOIN q
+            WHERE m.status = %s
+              AND m.sensitivity = ANY(%s)
+              {extra_sql}
+        ),
+        -- Relative temporal ranking: within items sharing the same
+        -- entity+property, newer items get a bonus over older ones.
+        -- This ensures "latest" queries prefer the most recent version.
+        with_relative_recency AS (
+            SELECT
+                s.*,
+                CASE
+                    WHEN s.entity IS NOT NULL AND s.property IS NOT NULL THEN
+                        -- rank 1 = newest within group
+                        0.8 * (1.0 - (
+                            COALESCE(
+                                (ROW_NUMBER() OVER (
+                                    PARTITION BY s.entity, s.property
+                                    ORDER BY COALESCE(s.last_confirmed, s.first_seen, '1970-01-01'::timestamptz) DESC
+                                ) - 1)::float
+                                / NULLIF(COUNT(*) OVER (PARTITION BY s.entity, s.property) - 1, 0),
+                                0.0
+                            )
+                        ))
+                    ELSE 0.0
+                END AS temporal_recency_bonus
+            FROM scored s
+        ),
+        ranked AS (
+            SELECT
+                *,
+                (
+                    (fts_rank * 3.0)
+                    + (vector_score * 1.1)
+                    + structured_bonus
+                    + importance_bonus
+                    + temporal_recency_bonus
+                ) AS final_score
+            FROM with_relative_recency
+        )
+        SELECT *
+        FROM ranked
+        ORDER BY
+            final_score DESC,
+            confidence DESC NULLS LAST,
+            importance DESC NULLS LAST,
+            last_confirmed DESC NULLS LAST,
+            id
+        LIMIT %s
+    """
+
+    # All positional params in order: query, query, vec, status, sensitivities, ...extra_filter_params..., limit
+    params = [query, query, vec, status, ["public", "internal"]] + extra_params + [limit]
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            rows = []
+            for rec in cur.fetchall():
+                row = dict(zip(cols, rec))
+                row["tags"] = row.get("tags") or []
+                row["candidate_reasons"] = row.get("candidate_reasons") or []
+                rows.append(row)
+            return rows
+
+
+def _search_memory_items_filtered_fts_only(
+    query: str,
+    filters: MetadataFilter | None = None,
+    status: str = "active",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """FTS-only fallback when embedding is unavailable."""
+    from memory_db import POOL
+
+    extra_sql, extra_params = _build_metadata_sql(filters)
+
+    sql = f"""
+        SELECT
+            id, text, memory_type, scope, entity, property, value, status,
+            confidence, importance, freshness_class,
+            source_agent, source_session, source_chunk,
+            first_seen, last_confirmed, supersedes,
+            tags, notes,
+            sensitivity,
+            ts_rank_cd(
+                to_tsvector(
+                    'english',
+                    COALESCE(text, '') || ' ' ||
+                    COALESCE(entity, '') || ' ' ||
+                    COALESCE(value, '')
+                ),
+                websearch_to_tsquery('english', %s)
+            ) AS fts_rank
+        FROM memory_items
+        WHERE status = %s
+          AND to_tsvector(
+                'english',
+                COALESCE(text, '') || ' ' ||
+                COALESCE(entity, '') || ' ' ||
+                COALESCE(value, '')
+              ) @@ websearch_to_tsquery('english', %s)
+          {extra_sql}
+        ORDER BY fts_rank DESC, last_confirmed DESC NULLS LAST
+        LIMIT %s
+    """
+
+    params = [query, status, query] + extra_params + [limit]
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            rows = []
+            for rec in cur.fetchall():
+                row = dict(zip(cols, rec))
+                row["tags"] = row.get("tags") or []
+                rows.append(row)
+            return rows
+
+
+async def query_db(app: FastAPI, query: str, query_vec: list[float], limit: int, filters: MetadataFilter | None = None) -> list[dict[str, Any]]:
+    if filters is not None:
+        return await run_in_executor(
+            app.state.io_executor,
+            search_memory_items_filtered,
+            query=query,
+            filters=filters,
+            status="active",
+            limit=limit,
+        )
     return await run_in_executor(
         app.state.io_executor,
         search_memory_items_by_terms,
@@ -284,7 +638,13 @@ def build_search_work_item_metadata(project_id: str | None, subproject_id: str |
     )
 
 
-async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+async def run_hot_search(
+    app: FastAPI,
+    query: str,
+    top_k: int,
+    filters: MetadataFilter | None = None,
+    rerank: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     embed_model: SentenceTransformer = app.state.embed_model
     reranker: CrossEncoder = app.state.reranker
     circuits: dict[str, SourceCircuit] = app.state.circuits
@@ -306,7 +666,7 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
     db_limit = top_k * 3
     source_meta: dict[str, Any] = {}
 
-    db_task = query_db(app, query, query_vec, db_limit)
+    db_task = query_db(app, query, query_vec, db_limit, filters=filters)
 
     if circuits["qdrant"].is_open():
         qdrant_task = None
@@ -346,9 +706,14 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
                 source_meta[name] = {"ok": False, "tripped": False, "error": repr(res)}
             continue
 
-        source_meta[name] = {"ok": True, "count": len(res)}
+        source_rows = res
+        # Apply metadata filters to Qdrant/graph results (DB filters are pushed into SQL)
+        if filters is not None and name in ("qdrant", "graph"):
+            source_rows = _apply_metadata_filter(source_rows, filters)
 
-        for row in res:
+        source_meta[name] = {"ok": True, "count": len(source_rows), "pre_filter": len(res)}
+
+        for row in source_rows:
             item = dict(row)
             item.setdefault("source_type", name)
             fp = result_fingerprint(item)
@@ -357,15 +722,23 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
             seen.add(fp)
             merged.append(item)
 
-    rerank_started = time.perf_counter()
-    reranked = await run_in_executor(app.state.model_executor, rerank_results, reranker, query, merged)
-    rerank_ms = round((time.perf_counter() - rerank_started) * 1000, 2)
+    rerank_ms = 0.0
+    if rerank and merged:
+        rerank_started = time.perf_counter()
+        reranked = await run_in_executor(app.state.model_executor, rerank_results, reranker, query, merged)
+        rerank_ms = round((time.perf_counter() - rerank_started) * 1000, 2)
+    else:
+        reranked = merged
 
     total_ms = round((time.perf_counter() - started) * 1000, 2)
     top_rows = reranked[:top_k]
 
+    filter_summary = None
+    if filters is not None:
+        filter_summary = {k: v for k, v in filters.model_dump().items() if v is not None}
+
     LOGGER.info(
-        "search_completed query=%r total_ms=%s embed_ms=%s source_ms=%s rerank_ms=%s merged=%s results=%s source_meta=%s",
+        "search_completed query=%r total_ms=%s embed_ms=%s source_ms=%s rerank_ms=%s merged=%s results=%s filters=%s rerank=%s source_meta=%s",
         query,
         total_ms,
         embed_ms,
@@ -373,6 +746,8 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
         rerank_ms,
         len(merged),
         len(top_rows),
+        filter_summary,
+        rerank,
         source_meta,
     )
 
@@ -381,10 +756,12 @@ async def run_hot_search(app: FastAPI, query: str, top_k: int) -> tuple[list[dic
         "embed_ms": embed_ms,
         "source_ms": source_ms,
         "rerank_ms": rerank_ms,
+        "rerank_applied": rerank and bool(merged),
         "device": app.state.device,
         "source_meta": source_meta,
         "rerank_cap": RERANK_CAP,
         "rerank_text_char_cap": RERANK_TEXT_CHAR_CAP,
+        "filters_applied": filter_summary,
     }
     return top_rows, meta
 
@@ -408,9 +785,27 @@ async def health() -> dict[str, Any]:
 async def search_get(
     query: Annotated[str, Query(min_length=1)],
     top_k: Annotated[int, Query(ge=1, le=50)] = TOP_K,
+    entity: Annotated[str | None, Query(description="Filter by entity")] = None,
+    property: Annotated[str | None, Query(description="Filter by property", alias="property")] = None,
+    session_id: Annotated[str | None, Query(description="Filter by source_session")] = None,
+    source_agent: Annotated[str | None, Query(description="Filter by source_agent")] = None,
+    memory_type: Annotated[str | None, Query(description="Filter by memory_type")] = None,
+    scope: Annotated[str | None, Query(description="Filter by scope")] = None,
+    project_id: Annotated[str | None, Query(description="Filter by project_id")] = None,
+    min_confidence: Annotated[float | None, Query(ge=0.0, le=1.0, description="Minimum confidence")] = None,
+    rerank: Annotated[bool, Query(description="Apply cross-encoder reranking")] = True,
 ):
+    filters = None
+    filter_kwargs = {
+        "entity": entity, "property": property, "session_id": session_id,
+        "source_agent": source_agent, "memory_type": memory_type, "scope": scope,
+        "project_id": project_id, "min_confidence": min_confidence,
+    }
+    if any(v is not None for v in filter_kwargs.values()):
+        filters = MetadataFilter(**filter_kwargs)
+
     try:
-        rows, meta = await run_hot_search(app, query, top_k)
+        rows, meta = await run_hot_search(app, query, top_k, filters=filters, rerank=rerank)
         return SearchResponse(ok=True, query=query, results=[SearchResult(**r) for r in rows], meta=meta)
     except Exception:
         LOGGER.exception("search_request_failed query=%r", query)
@@ -420,7 +815,7 @@ async def search_get(
 @app.post("/search", response_model=SearchResponse)
 async def search_post(req: SearchRequest):
     try:
-        rows, meta = await run_hot_search(app, req.query, req.top_k)
+        rows, meta = await run_hot_search(app, req.query, req.top_k, filters=req.filters, rerank=req.rerank)
         return SearchResponse(ok=True, query=req.query, results=[SearchResult(**r) for r in rows], meta=meta)
     except Exception:
         LOGGER.exception("search_request_failed query=%r", req.query)

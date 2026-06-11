@@ -73,3 +73,17 @@ control_panel/control_panel_config.json
 # Large benchmark datasets (>100MB, download separately)
 benchmarks/longmemeval/longmemeval_s.json
 benchmarks/longmemeval/longmemeval_s_cleaned.json
+
+# Benchmark datasets (downloaded at runtime)
+benchmarks/datasets/locomo/*.json
+benchmarks/datasets/hotpotqa/*.json
+
+# Benchmark results (machine-specific)
+benchmarks/results/
+
+# Old control panel backup
+control_panel/templates/*_backup*
+
+# Python
+__pycache__/
+*.pyc

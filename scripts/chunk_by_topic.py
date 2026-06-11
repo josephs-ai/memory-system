@@ -2,33 +2,46 @@
 Chunk By Topic — utility for the OpenClaw memory system.
 
 Key functions: clean_role_prefix, normalize_line, is_header, is_startup_instruction
+S4: supports --offset for delta-aware chunking.
 """
 import re
 import argparse
 from pathlib import Path
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--input", required=True)
-parser.add_argument("--outdir", required=True)
-args = parser.parse_args()
 
-input_path = Path(args.input)
-outdir = Path(args.outdir)
-outdir.mkdir(parents=True, exist_ok=True)
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Byte offset into input file; only process content from here onward (S4 delta chunking)",
+    )
+    return parser.parse_args()
 
-text = input_path.read_text(encoding="utf-8", errors="ignore")
-lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+
+def _load_text(path: Path, offset: int = 0) -> str:
+    with open(path, "rb") as f:
+        if offset > 0:
+            f.seek(offset)
+        return f.read().decode("utf-8", errors="ignore")
+
 
 def clean_role_prefix(line: str) -> str:
     return re.sub(r"^(USER|ASSISTANT):\s*", "", line, flags=re.IGNORECASE).strip()
+
 
 def normalize_line(line: str) -> str:
     t = clean_role_prefix(line)
     t = re.sub(r"^(did u know that|did you know that)\s+", "", t, flags=re.IGNORECASE)
     return t.strip()
 
+
 def is_header(line: str) -> bool:
     return line.strip().startswith("=====")
+
 
 def is_startup_instruction(line: str) -> bool:
     t = normalize_line(line).lower()
@@ -37,6 +50,7 @@ def is_startup_instruction(line: str) -> bool:
         or "execute your session startup sequence" in t
         or "read the required files before responding" in t
     )
+
 
 def is_chatter(line: str) -> bool:
     t = normalize_line(line).lower()
@@ -56,6 +70,7 @@ def is_chatter(line: str) -> bool:
         or "i am here" in t
         or "we got distracted" in t
     )
+
 
 def is_durable_statement(line: str) -> bool:
     t = normalize_line(line).lower()
@@ -81,6 +96,7 @@ def is_durable_statement(line: str) -> bool:
     padded = f" {t} "
     return any(cue in padded for cue in durable_cues)
 
+
 def classify_line(line: str) -> str:
     if is_header(line):
         return "header"
@@ -92,43 +108,65 @@ def classify_line(line: str) -> str:
         return "durable"
     return "other"
 
-chunks = []
-current = []
-current_kind = None
-current_norms = set()
 
-for line in lines:
-    kind = classify_line(line)
-    norm = normalize_line(line)
+def run_chunking(input_path: Path, outdir: Path, offset: int = 0) -> list[tuple[str, list[str]]]:
+    """Core chunking logic — returns list of (kind, lines) tuples and writes chunk files."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    text = _load_text(input_path, offset)
+    lines_raw = [line.rstrip() for line in text.splitlines() if line.strip()]
 
-    if kind == "header":
-        continue
+    chunks: list[tuple[str, list[str]]] = []
+    current: list[str] = []
+    current_kind = None
+    current_norms: set[str] = set()
 
-    should_split = False
+    for line in lines_raw:
+        kind = classify_line(line)
+        norm = normalize_line(line)
+
+        if kind == "header":
+            continue
+
+        should_split = False
+        if current:
+            if kind != current_kind:
+                should_split = True
+            elif kind == "durable" and norm not in current_norms:
+                should_split = True
+
+        if should_split:
+            chunks.append((current_kind, current))
+            current = [line]
+            current_kind = kind
+            current_norms = {norm}
+        else:
+            current.append(line)
+            current_kind = kind
+            current_norms.add(norm)
+
     if current:
-        if kind != current_kind:
-            should_split = True
-        elif kind == "durable" and norm not in current_norms:
-            should_split = True
-
-    if should_split:
         chunks.append((current_kind, current))
-        current = [line]
-        current_kind = kind
-        current_norms = {norm}
-    else:
-        current.append(line)
-        current_kind = kind
-        current_norms.add(norm)
 
-if current:
-    chunks.append((current_kind, current))
+    base = input_path.stem
+    for i, (kind, chunk) in enumerate(chunks, start=1):
+        out = outdir / f"{base}.topic{i:02d}.{kind}.txt"
+        out.write_text("\n".join(chunk) + "\n", encoding="utf-8")
 
-base = input_path.stem
-for i, (kind, chunk) in enumerate(chunks, start=1):
-    out = outdir / f"{base}.topic{i:02d}.{kind}.txt"
-    out.write_text("\n".join(chunk) + "\n", encoding="utf-8")
+    return chunks
 
-print(f"chunks: {len(chunks)}")
-for i, (kind, chunk) in enumerate(chunks, start=1):
-    print(f"{i:02d}: kind={kind} lines={len(chunk)}")
+
+# Legacy module-level compat for older import callers.
+input_path = None  # type: ignore
+outdir = None  # type: ignore
+text = None  # type: ignore
+lines = []  # type: ignore
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    input_path = Path(args.input)
+    outdir = Path(args.outdir)
+    chunks = run_chunking(input_path, outdir, args.offset)
+    print(f"chunks: {len(chunks)}")
+    for i, (kind, chunk) in enumerate(chunks, start=1):
+        print(f"{i:02d}: kind={kind} lines={len(chunk)}")

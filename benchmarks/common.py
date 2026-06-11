@@ -1,0 +1,710 @@
+"""
+common.py — Shared utilities for memory system benchmark evaluation.
+
+Provides:
+- Timing / latency measurement (p50, p95)
+- Text scoring: exact-match F1, token-level F1
+- IR metrics: recall@k, MRR
+- LLM-as-judge scoring (Claude / OpenAI)
+- Memory item ingestion helper (with isolated project namespace)
+- Cleanup helper (delete benchmark items by source_agent prefix)
+- Results formatting (JSON + markdown table)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import re
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from memory_db import (
+    upsert_memory_items,
+    upsert_memory_embedding,
+    hybrid_search_memory_items,
+    POOL,
+)
+from vector_store_qdrant import upsert_memory_vector, ensure_qdrant_collection
+
+LOGGER = logging.getLogger("openclaw.benchmarks.common")
+
+BENCHMARKS_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = BENCHMARKS_DIR / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
+
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_embed_model = None
+
+
+# ---------------------------------------------------------------------------
+# Embedding
+# ---------------------------------------------------------------------------
+
+
+def get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer(MODEL_NAME)
+        LOGGER.info("Loaded embedding model: %s", MODEL_NAME)
+    return _embed_model
+
+
+def embed_texts(texts: list[str]) -> np.ndarray:
+    model = get_embed_model()
+    return model.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+
+
+def embed_text(text: str) -> np.ndarray:
+    return embed_texts([text])[0]
+
+
+# ---------------------------------------------------------------------------
+# Memory item ingestion
+# ---------------------------------------------------------------------------
+
+
+def make_memory_item(
+    text: str,
+    *,
+    source_agent: str,
+    source_session: str | None = None,
+    entity: str | None = None,
+    property: str | None = None,
+    value: str | None = None,
+    memory_type: str = "fact",
+    scope: str = "benchmark",
+    tags: list[str] | None = None,
+    importance: float = 0.5,
+    item_id: str | None = None,
+) -> dict:
+    """Create a memory item dict suitable for upsert_memory_items()."""
+    return {
+        "id": item_id or f"bench_{uuid.uuid4().hex}",
+        "text": text,
+        "memory_type": memory_type,
+        "scope": scope,
+        "project_id": None,
+        "subproject_id": None,
+        "workflow_id": None,
+        "pipeline_id": None,
+        "context_scope_id": None,
+        "context_scope_type": None,
+        "context_scope_payload": {},
+        "inheritance_policy": None,
+        "scope_confidence": 1.0,
+        "entity": entity,
+        "property": property,
+        "value": value,
+        "status": "active",
+        "confidence": 0.9,
+        "importance": importance,
+        "freshness_class": "stable",
+        "source_agent": source_agent,
+        "source_session": source_session,
+        "source_chunk": None,
+        "first_seen": datetime.now(timezone.utc).isoformat(),
+        "last_confirmed": datetime.now(timezone.utc).isoformat(),
+        "supersedes": None,
+        "tags": tags or [],
+        "notes": None,
+        "candidate_id": None,
+        "candidate_score": None,
+        "candidate_reasons": [],
+        "suggested_route": None,
+        "target_file": None,
+        "target_section": None,
+        "sensitivity": "public",
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "approved_by": "benchmark",
+        "approval_source": "benchmark",
+        "rejected_at": None,
+        "rejected_by": None,
+        "rejection_reason": None,
+        "rejection_source": None,
+        "ranking_bonus": 0.0,
+        "ranking_penalty": 0.0,
+        "feedback_last_applied_at": None,
+    }
+
+
+def ingest_memory_items(items: list[dict], batch_size: int = 128) -> int:
+    """
+    Ingest items into memory_items + embeddings + Qdrant.
+    Batches Qdrant upserts for speed.
+    Returns number of items ingested.
+    """
+    from vector_store_qdrant import (
+        get_qdrant_client,
+        QDRANT_COLLECTION,
+        qdrant_point_id,
+    )
+    from qdrant_client.http import models as qdrant_models
+
+    ensure_qdrant_collection()
+    client = get_qdrant_client()
+
+    texts = [item["text"] or "" for item in items]
+    total = len(items)
+
+    for start in range(0, total, batch_size):
+        batch_items = items[start : start + batch_size]
+        batch_texts = texts[start : start + batch_size]
+
+        embeddings = embed_texts(batch_texts)
+
+        # 1. Upsert to PostgreSQL (bulk)
+        upsert_memory_items(batch_items)
+
+        # 2. Upsert embeddings to pg (bulk via executemany in upsert_memory_embedding)
+        for item, emb in zip(batch_items, embeddings):
+            vec = emb.tolist()
+            upsert_memory_embedding(item["id"], MODEL_NAME, vec)
+
+        # 3. Batch upsert to Qdrant
+        points = []
+        for item, emb in zip(batch_items, embeddings):
+            points.append(qdrant_models.PointStruct(
+                id=qdrant_point_id(item["id"]),
+                vector=emb.tolist(),
+                payload={
+                    "id": item["id"],
+                    "text": item.get("text"),
+                    "memory_type": item.get("memory_type"),
+                    "scope": item.get("scope"),
+                    "entity": item.get("entity"),
+                    "property": item.get("property"),
+                    "value": item.get("value"),
+                },
+            ))
+        client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+
+    return total
+
+
+def cleanup_benchmark_items(source_agent_prefix: str) -> int:
+    """
+    Delete all memory items whose source_agent starts with the given prefix.
+    Also deletes associated embeddings (CASCADE) and Qdrant vectors.
+    Returns number of rows deleted.
+    """
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            # Fetch IDs first for Qdrant cleanup
+            cur.execute(
+                "SELECT id FROM memory_items WHERE source_agent LIKE %s",
+                (source_agent_prefix + "%",),
+            )
+            ids = [row[0] for row in cur.fetchall()]
+
+            if not ids:
+                return 0
+
+            cur.execute(
+                "DELETE FROM memory_items WHERE source_agent LIKE %s",
+                (source_agent_prefix + "%",),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+
+    # Qdrant cleanup
+    try:
+        from vector_store_qdrant import get_qdrant_client, QDRANT_COLLECTION
+
+        client = get_qdrant_client()
+        # Convert memory IDs to Qdrant point UUIDs (same approach as upsert_memory_vector)
+        from vector_store_qdrant import qdrant_point_id as _qdrant_id
+
+        # Delete in chunks of 100
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            point_ids = [_qdrant_id(mid) for mid in chunk]
+            try:
+                client.delete(
+                    collection_name=QDRANT_COLLECTION,
+                    points_selector=point_ids,
+                )
+            except Exception as e:
+                LOGGER.warning("Qdrant delete failed for chunk: %s", e)
+    except Exception as e:
+        LOGGER.warning("Qdrant cleanup skipped: %s", e)
+
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# Retrieval
+# ---------------------------------------------------------------------------
+
+
+def retrieve(
+    query: str,
+    *,
+    limit: int = 10,
+    source_agent_prefix: str | None = None,
+    entity_filter: str | None = None,
+    session_filter: str | None = None,
+    memory_type_filter: str | None = None,
+    use_full_pipeline: bool = True,
+) -> tuple[list[dict], float]:
+    """
+    Run search for query. Returns (results, latency_seconds).
+
+    When use_full_pipeline=True (default), uses the full search pipeline
+    including metadata filtering, Qdrant vector search, cross-encoder
+    reranking, feedback boost, and temporal scoring.
+
+    Metadata filters (entity_filter, session_filter, memory_type_filter)
+    are pushed into SQL for DB queries and applied post-retrieval for
+    Qdrant/graph sources — matching production search_memory_service.py.
+    """
+    t0 = time.perf_counter()
+    qvec = embed_text(query)
+
+    if use_full_pipeline:
+        try:
+            results = _retrieve_full_pipeline(
+                query, qvec, limit=limit,
+                source_agent_prefix=source_agent_prefix,
+                entity_filter=entity_filter,
+                session_filter=session_filter,
+                memory_type_filter=memory_type_filter,
+            )
+            latency = time.perf_counter() - t0
+            return results, latency
+        except Exception as e:
+            LOGGER.warning("Full pipeline failed, falling back to basic: %s", e)
+
+    # Basic fallback
+    results = hybrid_search_memory_items(
+        qvec,
+        query_text=query,
+        status="active",
+        allowed_sensitivities=["public", "internal"],
+        limit=limit,
+        source_agent_prefix=source_agent_prefix,
+    )
+    latency = time.perf_counter() - t0
+    return results, latency
+
+
+# Cache the cross-encoder model at module level to avoid reloading per query
+_reranker_model = None
+
+
+def _get_reranker():
+    global _reranker_model
+    if _reranker_model is None:
+        from sentence_transformers import CrossEncoder
+        _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        LOGGER.info("Loaded cross-encoder reranker: cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _reranker_model
+
+
+def _retrieve_full_pipeline(
+    query: str,
+    qvec: np.ndarray,
+    *,
+    limit: int = 10,
+    source_agent_prefix: str | None = None,
+    entity_filter: str | None = None,
+    session_filter: str | None = None,
+    memory_type_filter: str | None = None,
+) -> list[dict]:
+    """
+    Full retrieval pipeline matching production search_memory_service.py:
+    1. PostgreSQL hybrid search with metadata filters pushed into SQL
+    2. Qdrant vector search with post-retrieval metadata filtering
+    3. Cross-encoder reranking
+    4. Temporal scoring + feedback boost
+    """
+    import math
+
+    def sigmoid(x):
+        return 1.0 / (1.0 + math.exp(-float(x)))
+
+    # Build MetadataFilter if any filters are specified
+    metadata_filter = None
+    has_filters = any(f is not None for f in [entity_filter, session_filter, memory_type_filter])
+    if has_filters:
+        try:
+            from search_memory_service import MetadataFilter, _apply_metadata_filter
+            metadata_filter = MetadataFilter(
+                entity=entity_filter,
+                session_id=session_filter,
+                memory_type=memory_type_filter,
+            )
+        except ImportError:
+            LOGGER.warning("search_memory_service not importable, skipping metadata filters")
+
+    # Step 1: PostgreSQL search with metadata filters pushed into SQL
+    if metadata_filter is not None:
+        try:
+            from search_memory_service import search_memory_items_filtered
+            # Hybrid search with filters in SQL WHERE clause — no post-filter loss
+            canonical_items = search_memory_items_filtered(
+                query,
+                filters=metadata_filter,
+                status="active",
+                limit=50,
+                query_embedding=qvec.tolist(),
+            )
+        except Exception as e:
+            LOGGER.warning("Filtered hybrid search failed: %s, falling back to post-filter", e)
+            canonical_items = hybrid_search_memory_items(
+                qvec, query_text=query, status="active",
+                allowed_sensitivities=["public", "internal"],
+                limit=50, source_agent_prefix=source_agent_prefix,
+            )
+            try:
+                from search_memory_service import _apply_metadata_filter
+                canonical_items = _apply_metadata_filter(canonical_items, metadata_filter)
+            except ImportError:
+                pass
+    else:
+        # Always try the filtered search path (even without metadata filters)
+        # because it includes temporal recency boost in the SQL scoring.
+        try:
+            from search_memory_service import search_memory_items_filtered
+            canonical_items = search_memory_items_filtered(
+                query,
+                filters=None,
+                status="active",
+                limit=50,
+                query_embedding=qvec.tolist(),
+            )
+            # Post-filter by source_agent_prefix if set
+            if source_agent_prefix:
+                canonical_items = [
+                    r for r in canonical_items
+                    if (r.get("source_agent") or "").startswith(source_agent_prefix)
+                ]
+        except Exception:
+            canonical_items = hybrid_search_memory_items(
+                qvec, query_text=query, status="active",
+                allowed_sensitivities=["public", "internal"],
+                limit=50, source_agent_prefix=source_agent_prefix,
+            )
+
+    scored = []
+    seen_texts = set()
+
+    for item in canonical_items:
+        text = item.get("text", "")
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
+        base_score = float(item.get("final_score", 0) or item.get("fts_rank", 0) or 0) + 0.10
+
+        # Temporal boost
+        temporal_boost = 0.0
+        try:
+            from temporal_scoring import compute_temporal_boost
+            temporal_boost = compute_temporal_boost(
+                item.get("first_seen") or item.get("last_confirmed"), query,
+            )
+        except Exception:
+            pass
+
+        row = {
+            "score": base_score + temporal_boost,
+            "text": text,
+            "source_type": "canonical",
+            "path": "db:memory_items",
+            **{k: v for k, v in item.items() if k not in ("final_score", "fts_rank")},
+        }
+        scored.append(row)
+
+    # Step 2: Qdrant vector search (supplementary) + post-retrieval metadata filter
+    try:
+        from vector_store_qdrant import search_memory_vectors
+        qdrant_hits = search_memory_vectors(qvec, limit=20)
+        qdrant_rows = []
+        for hit in qdrant_hits:
+            payload = hit.payload or {}
+            text = payload.get("text") or ""
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            qdrant_rows.append({
+                "score": float(hit.score or 0.0) + 0.20,
+                "text": text,
+                "source_type": "canonical_qdrant",
+                "path": "qdrant:memory_items",
+                **{k: v for k, v in payload.items() if k != "text"},
+            })
+
+        # Apply metadata filter post-retrieval for Qdrant results
+        if metadata_filter is not None and qdrant_rows:
+            try:
+                from search_memory_service import _apply_metadata_filter
+                qdrant_rows = _apply_metadata_filter(qdrant_rows, metadata_filter)
+            except ImportError:
+                pass
+
+        scored.extend(qdrant_rows)
+    except Exception as e:
+        LOGGER.debug("Qdrant supplementary search failed: %s", e)
+
+    # Step 3: Feedback boost
+    try:
+        from feedback_score_engine import feedback_boost_batch, classify_query_type
+        feedback_item_ids = [r.get("id") or r.get("item_id") for r in scored
+                            if r.get("id") or r.get("item_id")]
+        if feedback_item_ids:
+            query_type = classify_query_type(query)
+            boosts = feedback_boost_batch(feedback_item_ids, query_type=query_type)
+            for row in scored:
+                iid = row.get("id") or row.get("item_id")
+                if iid and iid in boosts:
+                    row["score"] += boosts[iid] * 0.15
+    except Exception:
+        pass
+
+    # Step 4: Cross-encoder reranking (cached model)
+    if scored:
+        top_n = min(12, len(scored))
+        scored.sort(key=lambda x: -x["score"])
+        head = scored[:top_n]
+        tail = scored[top_n:]
+
+        try:
+            reranker = _get_reranker()
+            pairs = [[query, row["text"]] for row in head]
+            raw_scores = reranker.predict(pairs)
+
+            for row, raw in zip(head, raw_scores):
+                row["rerank_score"] = sigmoid(float(raw))
+                row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
+
+            head.sort(key=lambda x: -x["score"])
+            scored = head + tail
+        except Exception as e:
+            LOGGER.warning("Cross-encoder reranking failed: %s", e)
+
+    results = scored[:limit]
+
+    # Post-retrieval: drop any items whose DB status is not 'active'.
+    # Qdrant results don't carry status, so re-verify against the DB for items
+    # that lack it (covers superseded/deleted items leaking from vector index).
+    ids_to_check = [r.get("id") for r in results if not r.get("status") and r.get("id")]
+    if ids_to_check:
+        try:
+            status_map: dict[str, str] = {}
+            with __import__("memory_db").POOL.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, status FROM memory_items WHERE id = ANY(%s)",
+                        (ids_to_check,),
+                    )
+                    for row in cur.fetchall():
+                        status_map[row[0]] = row[1]
+            results = [
+                r for r in results
+                if r.get("status") == "active"
+                or (not r.get("status") and status_map.get(r.get("id"), "active") == "active")
+            ]
+        except Exception:
+            pass
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Text scoring
+# ---------------------------------------------------------------------------
+
+
+def normalize_answer(s: str) -> str:
+    """Lowercase, remove punctuation/articles, collapse whitespace."""
+    s = s.lower()
+    s = re.sub(r"\b(a|an|the)\b", " ", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = " ".join(s.split())
+    return s
+
+
+def token_f1(pred: str, gold: str) -> float:
+    """Token-level F1 between prediction and gold answer."""
+    pred_tokens = normalize_answer(pred).split()
+    gold_tokens = normalize_answer(gold).split()
+    if not pred_tokens or not gold_tokens:
+        return float(pred_tokens == gold_tokens)
+    pred_counter: dict[str, int] = {}
+    for t in pred_tokens:
+        pred_counter[t] = pred_counter.get(t, 0) + 1
+    gold_counter: dict[str, int] = {}
+    for t in gold_tokens:
+        gold_counter[t] = gold_counter.get(t, 0) + 1
+    common = sum(min(pred_counter.get(t, 0), cnt) for t, cnt in gold_counter.items())
+    if common == 0:
+        return 0.0
+    precision = common / len(pred_tokens)
+    recall = common / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def exact_match(pred: str, gold: str) -> float:
+    return float(normalize_answer(pred) == normalize_answer(gold))
+
+
+# ---------------------------------------------------------------------------
+# IR metrics
+# ---------------------------------------------------------------------------
+
+
+def recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    if not relevant_ids:
+        return 0.0
+    hits = sum(1 for rid in retrieved_ids[:k] if rid in relevant_ids)
+    return hits / len(relevant_ids)
+
+
+def precision_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    if k == 0:
+        return 0.0
+    hits = sum(1 for rid in retrieved_ids[:k] if rid in relevant_ids)
+    return hits / k
+
+
+def mrr(retrieved_ids: list[str], relevant_ids: set[str]) -> float:
+    for rank, rid in enumerate(retrieved_ids, 1):
+        if rid in relevant_ids:
+            return 1.0 / rank
+    return 0.0
+
+
+def ndcg_at_k(retrieved_ids: list[str], relevance_map: dict[str, float], k: int) -> float:
+    dcg = sum(
+        relevance_map.get(rid, 0.0) / math.log2(rank + 1)
+        for rank, rid in enumerate(retrieved_ids[:k], 1)
+    )
+    ideal = sorted(relevance_map.values(), reverse=True)[:k]
+    idcg = sum(v / math.log2(i + 2) for i, v in enumerate(ideal))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------------
+
+
+def compute_percentiles(latencies: list[float]) -> dict[str, float]:
+    if not latencies:
+        return {"p50": 0.0, "p95": 0.0, "mean": 0.0}
+    arr = sorted(latencies)
+    n = len(arr)
+
+    def pct(p):
+        idx = max(0, min(n - 1, int(p / 100 * n)))
+        return arr[idx]
+
+    return {"p50": pct(50), "p95": pct(95), "mean": sum(arr) / n}
+
+
+# ---------------------------------------------------------------------------
+# Token counting (approximate)
+# ---------------------------------------------------------------------------
+
+
+def count_tokens_approx(text: str) -> int:
+    """Rough approximation: 4 chars per token."""
+    return max(1, len(text) // 4)
+
+
+def count_tokens_list(texts: list[str]) -> int:
+    return sum(count_tokens_approx(t) for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-judge
+# ---------------------------------------------------------------------------
+
+
+def llm_judge_answer(
+    question: str,
+    gold_answer: str,
+    predicted_answer: str,
+    *,
+    model: str = "claude-opus-4-6",
+) -> float:
+    """
+    Use an LLM to judge whether predicted_answer is correct given gold_answer.
+    Returns score in [0, 1].
+    """
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic()
+        prompt = f"""You are evaluating a question-answering system.
+
+Question: {question}
+Ground Truth Answer: {gold_answer}
+Predicted Answer: {predicted_answer}
+
+Is the predicted answer correct? Consider partial credit for partially correct answers.
+Respond with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<brief reason>"}}"""
+
+        msg = client.messages.create(
+            model=model,
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text.strip()
+        data = json.loads(text)
+        return float(data.get("score", 0.0))
+    except Exception as e:
+        LOGGER.warning("LLM judge failed: %s. Falling back to F1.", e)
+        return token_f1(predicted_answer, gold_answer)
+
+
+# ---------------------------------------------------------------------------
+# Results output
+# ---------------------------------------------------------------------------
+
+
+def save_results(benchmark_name: str, results: dict) -> Path:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out_path = RESULTS_DIR / f"{benchmark_name}_{ts}.json"
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    LOGGER.info("Saved results to %s", out_path)
+    return out_path
+
+
+def format_results_table(all_results: list[dict]) -> str:
+    """Format a list of benchmark result dicts into a markdown table."""
+    header = "| Benchmark | Score | Tokens | Latency p50 | Latency p95 |\n"
+    header += "|-----------|-------|--------|-------------|-------------|\n"
+    rows = []
+    for r in all_results:
+        name = r.get("benchmark", "?")
+        score = r.get("score", 0.0)
+        tokens = r.get("tokens_avg", 0)
+        p50 = r.get("latency_p50", 0.0)
+        p95 = r.get("latency_p95", 0.0)
+        rows.append(
+            f"| {name} | {score:.3f} | {tokens:.0f} | {p50*1000:.1f}ms | {p95*1000:.1f}ms |"
+        )
+    return header + "\n".join(rows)
+
+
+def print_results_table(all_results: list[dict]) -> None:
+    print("\n" + "=" * 60)
+    print("MEMORY SYSTEM BENCHMARK RESULTS")
+    print("=" * 60)
+    print(format_results_table(all_results))
+    print("=" * 60 + "\n")
