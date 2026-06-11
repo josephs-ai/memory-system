@@ -37,8 +37,35 @@ def load_json(path: str):
 
 
 def can_auto_supersede(candidate: dict, existing: dict) -> bool:
-    prop = candidate.get("property") or existing.get("property")
-    return prop in SAFE_SUPERSEDE_PROPERTIES
+    """Check if a candidate can auto-supersede an existing item.
+
+    Default: any item sharing the same entity+property+scope can supersede
+    if the candidate is newer. The old SAFE_SUPERSEDE_PROPERTIES allowlist
+    was too restrictive — it only covered 14 system properties, missing
+    real-world facts like location, job, theme, etc.
+
+    Exclusions: generic/accumulative properties where multiple values are
+    expected (utterance, fact, observation, episodic, tag).
+    """
+    NEVER_SUPERSEDE = {"utterance", "fact", "observation", "episodic", "tag", "note"}
+
+    prop = (candidate.get("property") or "").strip().lower()
+    if not prop or prop in NEVER_SUPERSEDE:
+        return False
+
+    # Both must share the same entity for supersede to apply
+    c_entity = (candidate.get("entity") or "").strip().lower()
+    e_entity = (existing.get("entity") or "").strip().lower()
+    if not c_entity or c_entity != e_entity:
+        return False
+
+    # Candidate must be newer (or same age) to supersede
+    c_ts = candidate.get("last_confirmed") or candidate.get("first_seen") or ""
+    e_ts = existing.get("last_confirmed") or existing.get("first_seen") or ""
+    if str(c_ts) < str(e_ts):
+        return False  # Candidate is older — don't supersede
+
+    return True
 
 def confidence_of(item: dict) -> float:
     try:

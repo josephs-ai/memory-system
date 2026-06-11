@@ -141,6 +141,69 @@ def make_memory_item(
     }
 
 
+def _reconcile_supersedes(new_items: list[dict]):
+    """After ingesting new items, check if any existing active items with the
+    same entity+property should be superseded. Uses the reconcile system's
+    can_auto_supersede() logic."""
+    try:
+        from memory_db import POOL
+        from reconcile_memory_items import can_auto_supersede
+    except ImportError:
+        return
+
+    # Group new items by (entity, property)
+    ep_map = {}
+    for item in new_items:
+        entity = (item.get("entity") or "").strip()
+        prop = (item.get("property") or "").strip()
+        if entity and prop:
+            key = (entity.lower(), prop.lower())
+            # Keep the newest item per key
+            existing = ep_map.get(key)
+            if existing is None:
+                ep_map[key] = item
+            else:
+                c_ts = str(item.get("last_confirmed") or item.get("first_seen") or "")
+                e_ts = str(existing.get("last_confirmed") or existing.get("first_seen") or "")
+                if c_ts > e_ts:
+                    ep_map[key] = item
+
+    if not ep_map:
+        return
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            for (entity_lower, prop_lower), new_item in ep_map.items():
+                # Find active items with same entity+property+source_agent that aren't this item.
+                # Scoped to same source_agent to avoid cross-scenario interference.
+                source_agent = new_item.get("source_agent") or ""
+                cur.execute("""
+                    SELECT id, entity, property, value, last_confirmed, first_seen,
+                           source_agent, status
+                    FROM memory_items
+                    WHERE LOWER(entity) = %s AND LOWER(property) = %s
+                      AND status = 'active'
+                      AND id != %s
+                      AND source_agent = %s
+                """, [entity_lower, prop_lower, new_item["id"], source_agent])
+
+                for row in cur.fetchall():
+                    existing = dict(zip(
+                        ["id", "entity", "property", "value", "last_confirmed",
+                         "first_seen", "source_agent", "status"], row))
+
+                    if can_auto_supersede(new_item, existing):
+                        cur.execute("""
+                            UPDATE memory_items
+                            SET status = 'superseded'
+                            WHERE id = %s AND status = 'active'
+                        """, [existing["id"]])
+                        LOGGER.debug("Superseded %s (entity=%s, prop=%s) by %s",
+                                     existing["id"], entity_lower, prop_lower, new_item["id"])
+
+            conn.commit()
+
+
 def ingest_memory_items(items: list[dict], batch_size: int = 128) -> int:
     """
     Ingest items into memory_items + embeddings + Qdrant.
@@ -168,6 +231,14 @@ def ingest_memory_items(items: list[dict], batch_size: int = 128) -> int:
 
         # 1. Upsert to PostgreSQL (bulk)
         upsert_memory_items(batch_items)
+
+        # 1b. Reconcile: auto-supersede older items with same entity+property.
+        # Only for non-benchmark items — benchmarks need full history for
+        # "earliest" and "first_mention" temporal queries.
+        # For benchmarks, conflict resolution happens at retrieval time via
+        # _deduplicate_entity_property() in the search service.
+        if batch_items and not (batch_items[0].get("source_agent") or "").startswith("benchmark_"):
+            _reconcile_supersedes(batch_items)
 
         # 2. Upsert embeddings to pg (bulk via executemany in upsert_memory_embedding)
         for item, emb in zip(batch_items, embeddings):

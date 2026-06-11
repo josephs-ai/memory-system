@@ -260,6 +260,65 @@ def _build_metadata_sql(filters: MetadataFilter | None) -> tuple[str, list[Any]]
     return " AND " + " AND ".join(clauses), params
 
 
+def _deduplicate_entity_property(rows: list[dict]) -> list[dict]:
+    """When multiple results share the same entity+property, keep only the newest.
+
+    This is the core conflict resolution mechanism: if "user.ide_theme = dark mode"
+    (from May) and "user.ide_theme = light mode" (from June) both appear in results,
+    only the June one survives. Generic properties like 'utterance' or 'fact' are
+    excluded since they don't represent replaceable facts.
+    """
+    from datetime import datetime
+
+    GENERIC_PROPS = frozenset({"utterance", "fact", "observation", "episodic", ""})
+
+    def _parse_ts(item):
+        for key in ("last_confirmed", "first_seen", "created_at"):
+            ts = item.get(key)
+            if ts is None:
+                continue
+            if isinstance(ts, datetime):
+                return ts
+            try:
+                s = str(ts).replace("T", " ").split("+")[0].split("Z")[0].strip()
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                    try:
+                        return datetime.strptime(s[:26], fmt)
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+        return datetime.min
+
+    seen = {}       # (entity, property) -> (index, timestamp)
+    remove = set()
+
+    for i, item in enumerate(rows):
+        entity = (item.get("entity") or "").strip().lower()
+        prop = (item.get("property") or "").strip().lower()
+
+        if not entity or prop in GENERIC_PROPS:
+            continue
+
+        key = (entity, prop)
+        ts = _parse_ts(item)
+
+        if key in seen:
+            prev_idx, prev_ts = seen[key]
+            if ts > prev_ts:
+                remove.add(prev_idx)
+                seen[key] = (i, ts)
+            else:
+                remove.add(i)
+        else:
+            seen[key] = (i, ts)
+
+    if remove:
+        rows = [r for i, r in enumerate(rows) if i not in remove]
+
+    return rows
+
+
 def search_memory_items_filtered(
     query: str,
     filters: MetadataFilter | None = None,
@@ -460,6 +519,11 @@ def search_memory_items_filtered(
                 row["tags"] = row.get("tags") or []
                 row["candidate_reasons"] = row.get("candidate_reasons") or []
                 rows.append(row)
+
+            # Entity+property conflict resolution: when multiple items
+            # share the same entity+property, keep only the most recent.
+            rows = _deduplicate_entity_property(rows)
+
             return rows
 
 
