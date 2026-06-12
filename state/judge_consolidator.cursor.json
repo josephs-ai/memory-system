@@ -1,0 +1,11 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "path": "/home/joseph-ding/.openclaw/agents/judge_consolidator/sessions/boot-2026-06-09_09-10-37-685-2a38a84f.jsonl",
+  "inode": 3449443,
+  "device": 64770,
+  "size": 6947,
+  "head_hash": "49d2064d6cae26ca923420615a5ddc9e2b265b188893d837115a760d5589332d",
+  "tail_hash": "e7d09c9274fd20482b42ff1b5ca1ab16d124c3900d247856d7689f85347dbd2c",
+  "processed_offset": 6947,
+  "committed_offset": 6947
+}

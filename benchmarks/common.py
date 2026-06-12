@@ -233,12 +233,7 @@ def ingest_memory_items(items: list[dict], batch_size: int = 128) -> int:
         upsert_memory_items(batch_items)
 
         # 1b. Reconcile: auto-supersede older items with same entity+property.
-        # Only for non-benchmark items — benchmarks need full history for
-        # "earliest" and "first_mention" temporal queries.
-        # For benchmarks, conflict resolution happens at retrieval time via
-        # _deduplicate_entity_property() in the search service.
-        if batch_items and not (batch_items[0].get("source_agent") or "").startswith("benchmark_"):
-            _reconcile_supersedes(batch_items)
+        _reconcile_supersedes(batch_items)
 
         # 2. Upsert embeddings to pg (bulk via executemany in upsert_memory_embedding)
         for item, emb in zip(batch_items, embeddings):
@@ -525,6 +520,24 @@ def _retrieve_full_pipeline(
                 qdrant_rows = _apply_metadata_filter(qdrant_rows, metadata_filter)
             except ImportError:
                 pass
+
+        # Filter out superseded/archived items from Qdrant (phantom vectors)
+        if qdrant_rows:
+            try:
+                qdrant_ids = [r.get("id") or r.get("item_id") for r in qdrant_rows if r.get("id") or r.get("item_id")]
+                if qdrant_ids:
+                    with POOL.connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT id FROM memory_items WHERE id = ANY(%s) AND status != 'active'",
+                                [qdrant_ids],
+                            )
+                            non_active_ids = {row[0] for row in cur.fetchall()}
+                    if non_active_ids:
+                        qdrant_rows = [r for r in qdrant_rows
+                                       if (r.get("id") or r.get("item_id")) not in non_active_ids]
+            except Exception as e:
+                LOGGER.warning("Qdrant phantom filter failed: %s", e)
 
         scored.extend(qdrant_rows)
     except Exception as e:

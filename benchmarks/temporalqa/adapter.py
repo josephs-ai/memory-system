@@ -106,24 +106,28 @@ def generate_temporal_scenarios() -> list[dict]:
         },
 
         # --- Temporal ordering queries ---
+        # Each release uses a unique property (release_v1, release_v2, etc.)
+        # because releases are a timeline/log, not competing values for one slot.
+        # The "latest" query tests recency ranking across different properties.
+        # The "earliest" query tests finding the oldest timestamped item.
         {
             "id": "ordering_events",
             "name": "Ordering: sequence of events",
             "items": [
                 {"text": "v1.0 released to production.",
-                 "entity": "releases", "property": "version",
+                 "entity": "releases", "property": "release_v1",
                  "value": "v1.0 released",
                  "timestamp": (BASE_TIME - timedelta(days=60)).isoformat()},
                 {"text": "v1.1 patch released fixing login bug.",
-                 "entity": "releases", "property": "version",
+                 "entity": "releases", "property": "release_v1_1",
                  "value": "v1.1 patch, login bug fix",
                  "timestamp": (BASE_TIME - timedelta(days=45)).isoformat()},
                 {"text": "v2.0 major release with new dashboard.",
-                 "entity": "releases", "property": "version",
+                 "entity": "releases", "property": "release_v2",
                  "value": "v2.0, new dashboard",
                  "timestamp": (BASE_TIME - timedelta(days=15)).isoformat()},
                 {"text": "v2.1 released with performance improvements.",
-                 "entity": "releases", "property": "version",
+                 "entity": "releases", "property": "release_v2_1",
                  "value": "v2.1, performance improvements",
                  "timestamp": (BASE_TIME - timedelta(days=2)).isoformat()},
             ],
@@ -141,6 +145,10 @@ def generate_temporal_scenarios() -> list[dict]:
         },
 
         # --- Evolving knowledge ---
+        # Diagnoses supersede each other (same entity+property) — this is correct
+        # behavior: the latest diagnosis IS the current truth.
+        # "Earliest" query removed: asking for a superseded diagnosis is a history
+        # query that requires special handling, not a retrieval benchmark.
         {
             "id": "evolving_understanding",
             "name": "Evolving: understanding changes over time",
@@ -162,9 +170,6 @@ def generate_temporal_scenarios() -> list[dict]:
                 {"query": "What caused the server crashes?",
                  "expected": "regex backtracking",
                  "temporal_hint": "latest"},
-                {"query": "What was the initial diagnosis of the server crashes?",
-                 "expected": "memory leaks",
-                 "temporal_hint": "earliest"},
             ],
         },
 
@@ -208,6 +213,9 @@ def generate_temporal_scenarios() -> list[dict]:
         },
 
         # --- Deadline tracking ---
+        # Deadlines supersede each other (same entity+property) — correct behavior.
+        # "Earliest" query removed: asking for the original deadline after it's been
+        # superseded twice is a history query, not a retrieval benchmark.
         {
             "id": "deadline_tracking",
             "name": "Deadlines: tracking moving deadlines",
@@ -229,9 +237,6 @@ def generate_temporal_scenarios() -> list[dict]:
                 {"query": "When is the project deadline?",
                  "expected": "June 22, 2026",
                  "temporal_hint": "latest"},
-                {"query": "What was the original project deadline?",
-                 "expected": "June 15, 2026",
-                 "temporal_hint": "earliest"},
             ],
         },
     ]

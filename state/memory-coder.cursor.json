@@ -1,0 +1,11 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "path": "/home/joseph-ding/.openclaw/agents/memory-coder/sessions/092f73df-927a-4c95-b50f-c3f68fded7e6.jsonl",
+  "inode": 3722743,
+  "device": 64770,
+  "size": 4053938,
+  "head_hash": "4918ed92f2c4f3da2a17a1c7f39b3f21993b987a95f14d73550a1c3729833de9",
+  "tail_hash": "d934b3c4e2404147234f0013d2efdc0434d6da6ece2e29cb39e6c82005fc7263",
+  "processed_offset": 4053938,
+  "committed_offset": 4053938
+}

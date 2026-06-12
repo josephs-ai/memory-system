@@ -1,0 +1,12 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "device": 64770,
+  "hash_window_bytes": 4096,
+  "head_hash": "1cbcf14819e0543d80013f51f4b6df005c1cfa6dbd6df3629e3cf59a2b01387b",
+  "inode": 3872740,
+  "last_complete_newline_offset": 1689040,
+  "mtime_ms": 1780975249898,
+  "session_file": "/home/joseph-ding/.openclaw/agents/memory-tester/sessions/5106cb78-985a-4e89-9d37-1842d743e84a.jsonl",
+  "size": 1689040,
+  "tail_hash": "7f3414cbb6474494b456580d72ed4905f7a0d347a44eeead46c54a97cbc52ea4"
+}

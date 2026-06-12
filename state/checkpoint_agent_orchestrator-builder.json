@@ -1,0 +1,12 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "device": 64770,
+  "hash_window_bytes": 4096,
+  "head_hash": "1727e1085ffc39e85fd1cc3eb9c07160e7414ec1979c788e19c70b29fb3f686f",
+  "inode": 3539009,
+  "last_complete_newline_offset": 101184,
+  "mtime_ms": 1780973314126,
+  "session_file": "/home/joseph-ding/.openclaw/agents/orchestrator-builder/sessions/boot-2026-06-09_01-46-53-090-c7290244.jsonl",
+  "size": 101184,
+  "tail_hash": "e4a1b0ee8816c14c2eac5cef1f3d696aa410baf21a4157fad22cd451e5ea5e18"
+}

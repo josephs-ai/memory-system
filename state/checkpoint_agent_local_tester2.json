@@ -1,0 +1,12 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "device": 64770,
+  "hash_window_bytes": 4096,
+  "head_hash": "0246539342f782b6849fa332952723be75f858e1609f1337018d028c5f2f053c",
+  "inode": 3449431,
+  "last_complete_newline_offset": 5755,
+  "mtime_ms": 1780970017189,
+  "session_file": "/home/joseph-ding/.openclaw/agents/local_tester2/sessions/boot-2026-06-09_01-53-29-439-84c73b66.jsonl",
+  "size": 5755,
+  "tail_hash": "cedc52fa7e9145446a5f6bc10fd9601ddcb09aa45c9e9a62056e9dd9931c8a69"
+}

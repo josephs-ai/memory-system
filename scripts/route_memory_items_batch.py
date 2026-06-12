@@ -4,8 +4,7 @@ Processes multiple candidates in a single pass for efficiency.
 """
 import json
 import argparse
-import subprocess
-import tempfile
+from functools import lru_cache
 from pathlib import Path
 from datetime import datetime, timezone
 from memory_promotion_gate import explicit_promotion_gate
@@ -16,9 +15,10 @@ from memory_db import (
     upsert_inbox,
     upsert_discarded,
     upsert_memory_item,
-    queue_item_exists_anywhere,
-    candidate_matches_rejected,
+    upsert_memory_items,
+    fetch_discarded_payloads,
     close_pool,
+    POOL,
 )
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
@@ -26,7 +26,8 @@ REVIEW_DIR = WORKSPACE / "memory" / "review"
 DECISIONS_LOG = REVIEW_DIR / "decisions.log"
 
 SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
-AGENT_POLICY_SCRIPT = SCRIPTS_DIR / "check_agent_memory_policy.py"
+REVIEW_DIR = WORKSPACE / "memory" / "review"
+AGENT_POLICY_FILE = REVIEW_DIR / "agent-memory-policy.json"
 
 
 def now_iso():
@@ -49,60 +50,141 @@ def load_jsonl_text(text: str):
     return items
 
 
-def append_log(line: str):
+def append_log(line: str, _buf: list | None = None):
+    """Append a decision log line. If _buf is a list, buffer there instead of writing."""
+    if _buf is not None:
+        _buf.append(line)
+    else:
+        with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
+def flush_log_buffer(buf: list):
+    """Write all buffered log lines at once."""
+    if not buf:
+        return
     with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        f.write("\n".join(buf) + "\n")
 
 
-def json_safe(value):
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+def bulk_fetch_existing_ids(item_ids: list[str]) -> set[str]:
+    """Check which IDs already exist in any queue/table, in one query."""
+    if not item_ids:
+        return set()
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM (
+                    SELECT id FROM memory_pending_stable WHERE id = ANY(%s)
+                    UNION ALL
+                    SELECT id FROM memory_inbox WHERE id = ANY(%s)
+                    UNION ALL
+                    SELECT id FROM memory_discarded WHERE id = ANY(%s)
+                    UNION ALL
+                    SELECT id FROM memory_items WHERE id = ANY(%s)
+                ) AS combined
+                """,
+                (item_ids, item_ids, item_ids, item_ids),
+            )
+            return {row[0] for row in cur.fetchall()}
 
 
-def write_temp_json(item: dict) -> Path:
-    tmp = Path(tempfile.mkstemp(suffix=".json")[1])
-    tmp.write_text(
-        json.dumps(item, ensure_ascii=False, indent=2, default=json_safe),
-        encoding="utf-8",
-    )
-    return tmp
+def build_rejected_index(discarded_payloads: list[dict]) -> tuple[set[str], set[tuple]]:
+    """Build fast lookup structures from discarded payloads for O(1) matching."""
+    text_set: set[str] = set()
+    slot_set: set[tuple] = set()
+    for old in discarded_payloads:
+        old_text = (old.get("text") or "").strip().lower()
+        if old_text:
+            text_set.add(old_text)
+        e, p, v, s = old.get("entity"), old.get("property"), old.get("value"), old.get("scope")
+        if e and p and v:
+            slot_set.add((e, p, v))
+            if s is not None:
+                slot_set.add((e, p, v, s))
+    return text_set, slot_set
+
+
+def fast_candidate_matches_rejected(item: dict, text_set: set[str], slot_set: set[tuple]) -> bool:
+    """Check if an item matches any previously rejected memory using prebuilt index."""
+    text = (item.get("text") or "").strip().lower()
+    if text and text in text_set:
+        return True
+    e, p, v, s = item.get("entity"), item.get("property"), item.get("value"), item.get("scope")
+    if e and p and v:
+        if (e, p, v) in slot_set:
+            return True
+        if s is not None and (e, p, v, s) in slot_set:
+            return True
+    return False
+
+
+def safe_group_write(batch_fn, single_fn, items: list[dict], route_name: str, log_buf: list[str]):
+    """Batch write when possible; fall back to per-item writes to isolate bad rows."""
+    if not items:
+        return
+    try:
+        batch_fn(items)
+    except Exception as e:
+        append_log(
+            f"{now_iso()} route={route_name} target=db_write mode=batch_failed error={type(e).__name__}:{e}",
+            log_buf,
+        )
+        for item in items:
+            try:
+                single_fn(item)
+            except Exception as item_err:
+                append_log(
+                    f"{now_iso()} route={route_name} id={item.get('id')} target=db_write mode=item_failed "
+                    f"error={type(item_err).__name__}:{item_err}",
+                    log_buf,
+                )
+
+
+@lru_cache(maxsize=1)
+def load_agent_policy() -> dict:
+    return json.loads(AGENT_POLICY_FILE.read_text(encoding="utf-8"))
 
 
 def apply_agent_policy(item: dict) -> tuple[str, str]:
+    policy = load_agent_policy()
     agent = item.get("source_agent", "default")
-    tmp = write_temp_json(item)
+    agent_policy = policy.get(agent, policy["default"])
 
-    try:
-        result = subprocess.run(
-            [
-                "python3",
-                str(AGENT_POLICY_SCRIPT),
-                "--agent",
-                agent,
-                "--item",
-                str(tmp),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        text = result.stdout.strip()
+    memory_type = item.get("memory_type")
+    scope = item.get("scope")
+    confidence = float(item.get("confidence", 0.0) or 0.0)
 
-        if text == "AUTO":
-            return "AUTO", "agent_policy_auto"
-        if text == "INBOX":
-            return "INBOX", "agent_policy_inbox"
-        if text.startswith("DISCARD"):
-            return "DISCARDED", f"agent_policy_{text.replace(' ', '_').lower()}"
+    allowed_types = agent_policy["allowed_memory_types"]
+    allowed_scopes = agent_policy["allowed_scopes"]
+    min_auto = float(agent_policy["min_confidence_auto"])
+    min_inbox = float(agent_policy["min_confidence_inbox"])
 
-        return "INBOX", "agent_policy_unknown_fallback"
+    if memory_type not in allowed_types:
+        return "DISCARDED", "agent_policy_discard_type_not_allowed"
 
-    finally:
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
+    if scope not in allowed_scopes:
+        return "DISCARDED", "agent_policy_discard_scope_not_allowed"
+
+    authority_basis = str(item.get("authority_basis") or "").strip().lower()
+    explicit_authority = authority_basis in {
+        "user_explicit",
+        "developer_explicit",
+        "tester_explicit",
+        "system_tool_verified",
+    }
+    explicit_approval = bool(item.get("approved_by") or item.get("approval_source"))
+
+    if confidence >= min_auto and (
+        explicit_authority and (explicit_approval or authority_basis == "system_tool_verified")
+    ):
+        return "AUTO", "agent_policy_auto"
+
+    if confidence >= min_inbox:
+        return "INBOX", "agent_policy_inbox"
+
+    return "DISCARDED", "agent_policy_discard_below_threshold"
 
 
 def decide_route(item: dict) -> tuple[str, str]:
@@ -156,6 +238,39 @@ def decide_route(item: dict) -> tuple[str, str]:
     return judge_route, judge_reason
 
 
+def normalize_item(item: dict) -> dict:
+    """Normalize schema drift between extraction output and routing expectations."""
+    # 1. id: extraction produces candidate_id, routing expects id
+    if not item.get("id") and item.get("candidate_id"):
+        item["id"] = item["candidate_id"]
+    # 2. confidence: extraction produces candidate_score (0-10), routing expects confidence (0-1)
+    if item.get("confidence") is None and item.get("candidate_score") is not None:
+        item["confidence"] = min(float(item["candidate_score"]) / 10.0, 1.0)
+    # 3. importance: derive from durability_class + impact_level if missing
+    if item.get("importance") is None:
+        durability = (item.get("durability_class") or "").lower()
+        impact = (item.get("impact_level") or "").lower()
+        dur_map = {"durable": 0.9, "stable": 0.8, "candidate": 0.6, "ephemeral": 0.2}
+        imp_map = {"critical": 0.95, "high": 0.85, "medium": 0.65, "low": 0.4}
+        dur_score = dur_map.get(durability, 0.5)
+        imp_score = imp_map.get(impact, 0.5)
+        item["importance"] = round((dur_score + imp_score) / 2.0, 3)
+    # 4. scope: extraction uses scope_envelope.scope_type, routing expects flat scope
+    if item.get("scope") is None:
+        scope_env = item.get("scope_envelope") or {}
+        raw = scope_env.get("raw") or {}
+        item["scope"] = raw.get("scope") or scope_env.get("scope_type") or "stable"
+    # 5. text: routing rules check text/normalized_text/claim_text — ensure text is set
+    if not item.get("text") and item.get("normalized_text"):
+        item["text"] = item["normalized_text"]
+    elif not item.get("text") and item.get("raw_text"):
+        item["text"] = item["raw_text"]
+    # 6. memory_type: routing checks memory_type, extraction uses claim_type
+    if not item.get("memory_type") and item.get("claim_type"):
+        item["memory_type"] = item["claim_type"]
+    return item
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -169,54 +284,56 @@ def main():
         print("NONE")
         return
 
+    # --- Phase 1: Normalize all items ---
+    for i, item in enumerate(items):
+        items[i] = normalize_item(item)
+
+    # --- Phase 2: Bulk prefetch existing IDs (one query) ---
+    all_ids = [item.get("id") for item in items if item.get("id")]
+    existing_ids = bulk_fetch_existing_ids(all_ids)
+
+    # --- Phase 3: Prefetch discarded payloads once, build fast lookup ---
+    discarded_payloads = fetch_discarded_payloads()
+    rejected_text_set, rejected_slot_set = build_rejected_index(discarded_payloads)
+    del discarded_payloads  # free memory
+
+    # --- Phase 4: Classify each item (no DB writes yet) ---
+    log_buf: list[str] = []
+    auto_items: list[dict] = []
+    inbox_items: list[dict] = []
+    pending_stable_items: list[dict] = []
+    discarded_items: list[dict] = []
     any_output = False
+    seen_batch_ids: set[str] = set()
 
     for item in items:
-        # Normalize schema drift between extraction output and routing expectations:
-        # 1. id: extraction produces candidate_id, routing expects id
-        if not item.get("id") and item.get("candidate_id"):
-            item["id"] = item["candidate_id"]
-        # 2. confidence: extraction produces candidate_score (0-10), routing expects confidence (0-1)
-        if item.get("confidence") is None and item.get("candidate_score") is not None:
-            item["confidence"] = min(float(item["candidate_score"]) / 10.0, 1.0)
-        # 3. importance: derive from durability_class + impact_level if missing
-        if item.get("importance") is None:
-            durability = (item.get("durability_class") or "").lower()
-            impact = (item.get("impact_level") or "").lower()
-            dur_map = {"durable": 0.9, "stable": 0.8, "candidate": 0.6, "ephemeral": 0.2}
-            imp_map = {"critical": 0.95, "high": 0.85, "medium": 0.65, "low": 0.4}
-            dur_score = dur_map.get(durability, 0.5)
-            imp_score = imp_map.get(impact, 0.5)
-            item["importance"] = round((dur_score + imp_score) / 2.0, 3)
-        # 4. scope: extraction uses scope_envelope.scope_type, routing expects flat scope
-        if item.get("scope") is None:
-            scope_env = item.get("scope_envelope") or {}
-            raw = scope_env.get("raw") or {}
-            item["scope"] = raw.get("scope") or scope_env.get("scope_type") or "stable"
-        # 5. text: routing rules check text/normalized_text/claim_text — ensure text is set
-        if not item.get("text") and item.get("normalized_text"):
-            item["text"] = item["normalized_text"]
-        elif not item.get("text") and item.get("raw_text"):
-            item["text"] = item["raw_text"]
-        # 6. memory_type: routing checks memory_type, extraction uses claim_type
-        if not item.get("memory_type") and item.get("claim_type"):
-            item["memory_type"] = item["claim_type"]
         item_id = item.get("id")
 
-        if item_id and queue_item_exists_anywhere(item_id):
-            print(f"SKIP_DUPLICATE {item_id} existing_db_queue")
-            append_log(f"{now_iso()} route=SKIP_DUPLICATE id={item_id} target=db_queue")
+        # Preserve old same-batch duplicate behavior: later duplicates skip once an earlier
+        # copy has been classified in this run.
+        if item_id and item_id in seen_batch_ids:
+            print(f"SKIP_DUPLICATE {item_id} existing_batch_queue")
+            append_log(f"{now_iso()} route=SKIP_DUPLICATE id={item_id} target=batch_queue", log_buf)
             any_output = True
             continue
 
-        matched_rejected, rejected_item = candidate_matches_rejected(item)
-        if matched_rejected:
-            upsert_discarded([item])
+        # Duplicate check against prefetched DB state
+        if item_id and item_id in existing_ids:
+            print(f"SKIP_DUPLICATE {item_id} existing_db_queue")
+            append_log(f"{now_iso()} route=SKIP_DUPLICATE id={item_id} target=db_queue", log_buf)
+            any_output = True
+            continue
+
+        # Rejected match against prebuilt index
+        if fast_candidate_matches_rejected(item, rejected_text_set, rejected_slot_set):
+            discarded_items.append(item)
+            if item_id:
+                seen_batch_ids.add(item_id)
             print("DISCARDED db:memory_discarded")
             append_log(
                 f"{now_iso()} route=DISCARDED id={item.get('id')} "
-                f"target=memory_discarded reason=previously_rejected_memory "
-                f"matched_rejected_id={rejected_item.get('id') if rejected_item else 'unknown'}"
+                f"target=memory_discarded reason=previously_rejected_memory",
+                log_buf,
             )
             any_output = True
             continue
@@ -224,44 +341,59 @@ def main():
         route, reason = decide_route(item)
 
         if route == "AUTO":
-            upsert_memory_item(item)
+            auto_items.append(item)
+            if item_id:
+                seen_batch_ids.add(item_id)
             print("AUTO db:memory_items")
             append_log(
                 f"{now_iso()} route=AUTO id={item.get('id')} "
                 f"confidence={item.get('confidence')} importance={item.get('importance')} "
-                f"target=memory_items reason={reason}"
+                f"target=memory_items reason={reason}",
+                log_buf,
             )
-            any_output = True
-
         elif route == "INBOX":
-            upsert_inbox([item])
+            inbox_items.append(item)
+            if item_id:
+                seen_batch_ids.add(item_id)
             print("INBOX db:memory_inbox")
             append_log(
                 f"{now_iso()} route=INBOX id={item.get('id')} "
                 f"confidence={item.get('confidence')} importance={item.get('importance')} "
-                f"target=memory_inbox reason={reason}"
+                f"target=memory_inbox reason={reason}",
+                log_buf,
             )
-            any_output = True
-
         elif route == "PENDING_STABLE":
-            upsert_pending_stable([item])
+            pending_stable_items.append(item)
+            if item_id:
+                seen_batch_ids.add(item_id)
             print("PENDING_STABLE db:memory_pending_stable")
             append_log(
                 f"{now_iso()} route=PENDING_STABLE id={item.get('id')} "
                 f"confidence={item.get('confidence')} importance={item.get('importance')} "
-                f"target=memory_pending_stable reason={reason}"
+                f"target=memory_pending_stable reason={reason}",
+                log_buf,
             )
-            any_output = True
-
         else:
-            upsert_discarded([item])
+            discarded_items.append(item)
+            if item_id:
+                seen_batch_ids.add(item_id)
             print("DISCARDED db:memory_discarded")
             append_log(
                 f"{now_iso()} route=DISCARDED id={item.get('id')} "
                 f"confidence={item.get('confidence')} importance={item.get('importance')} "
-                f"target=memory_discarded reason={reason}"
+                f"target=memory_discarded reason={reason}",
+                log_buf,
             )
-            any_output = True
+        any_output = True
+
+    # --- Phase 5: Batch writes with safe per-item fallback ---
+    safe_group_write(upsert_memory_items, upsert_memory_item, auto_items, "AUTO", log_buf)
+    safe_group_write(upsert_inbox, lambda item: upsert_inbox([item]), inbox_items, "INBOX", log_buf)
+    safe_group_write(upsert_pending_stable, lambda item: upsert_pending_stable([item]), pending_stable_items, "PENDING_STABLE", log_buf)
+    safe_group_write(upsert_discarded, lambda item: upsert_discarded([item]), discarded_items, "DISCARDED", log_buf)
+
+    # --- Phase 6: Flush log buffer ---
+    flush_log_buffer(log_buf)
 
     if not any_output:
         print("NONE")

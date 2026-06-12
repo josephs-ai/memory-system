@@ -1,0 +1,11 @@
+{
+  "cursor_version": "v2-hash-window-4096",
+  "path": "/home/joseph-ding/.openclaw/agents/orchestrator-builder/sessions/boot-2026-06-09_09-07-11-158-14500c5a.jsonl",
+  "inode": 3539019,
+  "device": 64770,
+  "size": 5628,
+  "head_hash": "514a32b556002e9ce902586314849d16f2963d47d77e3f1b117eda91a595e851",
+  "tail_hash": "ea0292448215b380ad48255497f2215f20b20cd8fe1049b8a15661fb091a46a8",
+  "processed_offset": 5628,
+  "committed_offset": 5628
+}

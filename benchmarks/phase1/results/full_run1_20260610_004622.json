@@ -1,0 +1,138 @@
+{
+  "benchmark": "LongMemEval",
+  "pipeline": "full",
+  "run_id": 1,
+  "timestamp": "2026-06-10T04:46:22.901415+00:00",
+  "config": {
+    "name": "full",
+    "use_vector": true,
+    "use_fts": true,
+    "use_rerank": true,
+    "use_graph": false,
+    "use_temporal": true,
+    "use_feedback": true,
+    "use_lifecycle_filter": true,
+    "vector_weight": 0.6,
+    "fts_weight": 0.4,
+    "top_k": 10,
+    "context_radius": 5,
+    "max_evidence": 8,
+    "answer_model": "gpt-4o"
+  },
+  "aggregate": {
+    "single-session-user": {
+      "f1": {
+        "mean": 0.7857,
+        "std": 0.303,
+        "ci_lower": 0.7857,
+        "ci_upper": 0.7857,
+        "n": 2
+      },
+      "em": {
+        "mean": 0.5,
+        "std": 0.7071,
+        "ci_lower": 0.5,
+        "ci_upper": 0.5,
+        "n": 2
+      },
+      "contains": {
+        "mean": 1.0,
+        "std": 0.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "n": 2
+      },
+      "retrieval_hit": {
+        "mean": 1.0,
+        "std": 0.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "n": 2
+      },
+      "retrieve_ms": {
+        "mean": 3295.7,
+        "std": 2327.5127,
+        "ci_lower": 3295.7,
+        "ci_upper": 3295.7,
+        "n": 2
+      }
+    },
+    "ALL": {
+      "f1": {
+        "mean": 0.7857,
+        "std": 0.303,
+        "ci_lower": 0.7857,
+        "ci_upper": 0.7857,
+        "n": 2
+      },
+      "em": {
+        "mean": 0.5,
+        "std": 0.7071,
+        "ci_lower": 0.5,
+        "ci_upper": 0.5,
+        "n": 2
+      },
+      "contains": {
+        "mean": 1.0,
+        "std": 0.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "n": 2
+      },
+      "retrieval_hit": {
+        "mean": 1.0,
+        "std": 0.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "n": 2
+      },
+      "retrieve_ms": {
+        "mean": 3295.7,
+        "std": 2327.5127,
+        "ci_lower": 3295.7,
+        "ci_upper": 3295.7,
+        "n": 2
+      }
+    }
+  },
+  "total_times": {
+    "ingest": 0.51,
+    "embed": 81.94,
+    "retrieve": 6.59,
+    "answer": 5.45
+  },
+  "per_question": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "gold_answer": "Business Administration",
+      "predicted_answer": "a degree in Business Administration",
+      "n_sessions": 53,
+      "n_items": 550,
+      "retrieval_hit": true,
+      "n_evidence": 8,
+      "f1": 0.5714285714285715,
+      "em": 0.0,
+      "contains": 1.0,
+      "retrieve_ms": 4941.5,
+      "answer_ms": 3323.7
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "question": "How long is my daily commute to work?",
+      "gold_answer": "45 minutes each way",
+      "predicted_answer": "45 minutes each way.",
+      "n_sessions": 45,
+      "n_items": 485,
+      "retrieval_hit": true,
+      "n_evidence": 8,
+      "f1": 1.0,
+      "em": 1.0,
+      "contains": 1.0,
+      "retrieve_ms": 1649.9,
+      "answer_ms": 2121.7
+    }
+  ]
+}

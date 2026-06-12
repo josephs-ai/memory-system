@@ -48,11 +48,10 @@ def main():
     ])
     (run_dir / "checkpoint_output.txt").write_text(checkpoint_out + "\n", encoding="utf-8")
 
-    maintenance_cmd = ["python3", str(MAINTENANCE)]
     if args.force_maintenance:
-        maintenance_cmd.append("--force")
-
-    maintenance_out = run_capture(maintenance_cmd)
+        maintenance_out = run_capture(["python3", str(MAINTENANCE), "--force"])
+    else:
+        maintenance_out = "SKIPPED: checkpoint_agent.py already runs maintenance during checkpoint flow"
     (run_dir / "maintenance_output.txt").write_text(maintenance_out + "\n", encoding="utf-8")
 
     sync_out = run_capture([

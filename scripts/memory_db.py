@@ -902,6 +902,7 @@ def hybrid_search_memory_items(
     status: str = "active",
     allowed_sensitivities: list[str] | None = None,
     limit: int = 20,
+    source_agent_prefix: str | None = None,
 ):
     allowed_sensitivities = list(allowed_sensitivities or ["public"])
 
@@ -1010,6 +1011,7 @@ def hybrid_search_memory_items(
             CROSS JOIN q
             WHERE m.status = %s
               AND m.sensitivity = ANY(%s)
+              AND (%s::boolean IS FALSE OR m.source_agent LIKE %s)
         ),
         ranked AS (
             SELECT
@@ -1037,6 +1039,8 @@ def hybrid_search_memory_items(
 
     with POOL.connection() as conn:
         with conn.cursor() as cur:
+            sa_filter = bool(source_agent_prefix)
+            sa_like = (source_agent_prefix + "%") if source_agent_prefix else "%"
             cur.execute(
                 sql,
                 (
@@ -1045,6 +1049,8 @@ def hybrid_search_memory_items(
                     vec,
                     status,
                     allowed_sensitivities,
+                    sa_filter,
+                    sa_like,
                     limit,
                 ),
             )

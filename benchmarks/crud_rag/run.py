@@ -121,10 +121,17 @@ def evaluate_query(query: dict, *, run_id: str) -> dict:
 
     retrieved, latency = retrieve(q_text, limit=10, source_agent_prefix=run_id)
 
-    # Check if expected answer is in retrieved results
-    retrieved_texts = " ".join((r.get("text") or "") + " " + (r.get("value") or "") for r in retrieved).lower()
+    # Only evaluate results that belong to this benchmark run (same source_agent prefix).
+    # Cross-benchmark contamination (e.g. LoCoMo items about "blue" paint) must not
+    # trigger false negative_violations.
+    owned = [r for r in retrieved if (r.get("source_agent") or "").startswith(run_id)]
+    # Fall back to all results if source_agent filter yields nothing (Qdrant payload gap)
+    eval_set = owned if owned else retrieved
 
-    found = expected.lower() in retrieved_texts if expected else False
+    retrieved_texts = " ".join((r.get("text") or "") + " " + (r.get("value") or "") for r in eval_set).lower()
+    all_retrieved_texts = " ".join((r.get("text") or "") + " " + (r.get("value") or "") for r in retrieved).lower()
+
+    found = expected.lower() in all_retrieved_texts if expected else False
 
     # Score correctness
     if should_find:
@@ -133,7 +140,7 @@ def evaluate_query(query: dict, *, run_id: str) -> dict:
         # Should NOT find the answer (deleted/nonexistent)
         correct = not found
 
-    # Check negative constraint
+    # Check negative constraint — only against owned results to avoid cross-contamination
     negative_violation = False
     if should_not_find and should_not_find.lower() in retrieved_texts:
         negative_violation = True

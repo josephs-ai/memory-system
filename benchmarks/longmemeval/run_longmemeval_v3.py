@@ -348,13 +348,13 @@ ANSWER (verbatim from user's words):"""
                 raise
 
 
-def normalize_answer(s: str) -> str:
-    s = s.lower().strip()
+def normalize_answer(s) -> str:
+    s = str(s).lower().strip()
     s = re.sub(r"[^a-z0-9\s]", "", s)
     s = re.sub(r"\s+", " ", s)
     return s
 
-def compute_f1(prediction: str, gold: str) -> float:
+def compute_f1(prediction, gold) -> float:
     pred_tokens = normalize_answer(prediction).split()
     gold_tokens = normalize_answer(gold).split()
     if not pred_tokens or not gold_tokens:
@@ -366,10 +366,10 @@ def compute_f1(prediction: str, gold: str) -> float:
     recall = len(common) / len(gold_tokens)
     return 2 * precision * recall / (precision + recall)
 
-def compute_em(prediction: str, gold: str) -> float:
+def compute_em(prediction, gold) -> float:
     return 1.0 if normalize_answer(prediction) == normalize_answer(gold) else 0.0
 
-def contains_answer(prediction: str, gold: str) -> float:
+def contains_answer(prediction, gold) -> float:
     return 1.0 if normalize_answer(gold) in normalize_answer(prediction) else 0.0
 
 

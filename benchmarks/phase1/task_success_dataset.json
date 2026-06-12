@@ -1,0 +1,132 @@
+[
+  {
+    "task_id": "tc-001",
+    "category": "task_completion",
+    "description": "Agent should use remembered preference for output format",
+    "setup": {
+      "memory_items": [
+        {
+          "text": "User prefers JSON output format over YAML",
+          "type": "preference",
+          "confidence": 0.95
+        },
+        {
+          "text": "User works on a Python project called 'memory-engine'",
+          "type": "fact",
+          "confidence": 0.9
+        }
+      ],
+      "task_prompt": "Generate a config file for the database connection",
+      "expected_behavior": "Agent produces JSON format without being asked"
+    },
+    "eval_criteria": {
+      "metric": "accuracy",
+      "threshold": 0.8,
+      "direction": "higher_better",
+      "judge_prompt": "Did the agent produce JSON output? Score 1 if yes, 0 if no."
+    }
+  },
+  {
+    "task_id": "tc-002",
+    "category": "task_completion",
+    "description": "Agent should remember architectural decision about database choice",
+    "setup": {
+      "memory_items": [
+        {
+          "text": "Decided to use PostgreSQL for the memory store, not MySQL. Reason: better JSON support, pg_trgm for fuzzy search.",
+          "type": "decision",
+          "confidence": 0.95
+        },
+        {
+          "text": "Neo4j is used only for graph relationships, not as primary store",
+          "type": "architectural_truth",
+          "confidence": 0.9
+        }
+      ],
+      "task_prompt": "What database should we use for storing memory items?",
+      "expected_behavior": "Agent recommends PostgreSQL and explains the prior decision"
+    },
+    "eval_criteria": {
+      "metric": "accuracy",
+      "threshold": 0.9,
+      "direction": "higher_better",
+      "judge_prompt": "Did the agent mention PostgreSQL as the chosen database and reference the prior decision? Score 1 if yes, 0 if no."
+    }
+  },
+  {
+    "task_id": "mp-001",
+    "category": "mistake_prevention",
+    "description": "Agent should avoid a previously documented pitfall",
+    "setup": {
+      "memory_items": [
+        {
+          "text": "BUG: Using psycopg2 with asyncio causes connection pool exhaustion. Must use psycopg (v3) async API instead.",
+          "type": "learned_fix",
+          "confidence": 0.95
+        }
+      ],
+      "task_prompt": "Write a function to query the database asynchronously",
+      "expected_behavior": "Agent uses psycopg (v3) async, NOT psycopg2"
+    },
+    "eval_criteria": {
+      "metric": "error_rate",
+      "threshold": 0.1,
+      "direction": "lower_better",
+      "judge_prompt": "Does the code use psycopg2 (bad) or psycopg v3 async (good)? Score 0 if psycopg2, 1 if psycopg v3."
+    }
+  },
+  {
+    "task_id": "ce-001",
+    "category": "context_efficiency",
+    "description": "Memory should reduce the context needed to answer correctly",
+    "setup": {
+      "memory_items": [
+        {
+          "text": "The search service runs on port 8765",
+          "type": "fact",
+          "confidence": 0.9
+        },
+        {
+          "text": "Qdrant runs on port 6333",
+          "type": "fact",
+          "confidence": 0.9
+        },
+        {
+          "text": "Neo4j bolt port is 7687",
+          "type": "fact",
+          "confidence": 0.9
+        }
+      ],
+      "task_prompt": "What ports do our services run on?",
+      "expected_behavior": "Agent answers from memory without needing to read config files"
+    },
+    "eval_criteria": {
+      "metric": "context_tokens",
+      "threshold": 500,
+      "direction": "lower_better"
+    }
+  },
+  {
+    "task_id": "cs-001",
+    "category": "consistency",
+    "description": "Same question across sessions should produce consistent answers",
+    "setup": {
+      "memory_items": [
+        {
+          "text": "Project uses MIT license",
+          "type": "fact",
+          "confidence": 0.95
+        }
+      ],
+      "task_prompt": "What license does the project use?",
+      "expected_behavior": "Agent consistently says MIT across multiple sessions",
+      "n_sessions": 5
+    },
+    "eval_criteria": {
+      "metric": "answer_match",
+      "threshold": 0.9,
+      "direction": "higher_better",
+      "judge_prompt": "Do all answers agree that the license is MIT? Score = fraction of matching answers."
+    }
+  }
+]
