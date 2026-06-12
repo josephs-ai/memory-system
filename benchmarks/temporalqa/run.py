@@ -29,7 +29,7 @@ from common import (
     save_results,
     token_f1,
 )
-from temporalqa.adapter import generate_temporal_scenarios
+from temporalqa.adapter import generate_temporal_scenarios, generate_temporal_scenarios_large
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger("openclaw.benchmarks.temporalqa")
@@ -37,9 +37,12 @@ LOGGER = logging.getLogger("openclaw.benchmarks.temporalqa")
 SOURCE_AGENT_PREFIX = "benchmark_temporalqa"
 
 
-def run_temporalqa(do_cleanup: bool = True) -> dict:
+def run_temporalqa(do_cleanup: bool = True, large: int = 0) -> dict:
     """Run Temporal QA benchmark."""
-    scenarios = generate_temporal_scenarios()
+    if large > 0:
+        scenarios = generate_temporal_scenarios_large(count=large)
+    else:
+        scenarios = generate_temporal_scenarios()
     LOGGER.info("Running %d Temporal QA scenarios", len(scenarios))
 
     all_results = []
@@ -164,10 +167,11 @@ def run_temporalqa(do_cleanup: bool = True) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="TemporalQA benchmark")
     parser.add_argument("--no-cleanup", action="store_true")
+    parser.add_argument("--large", type=int, default=0, help="Generate N latest queries (0=use hand-crafted only)")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
 
-    results = run_temporalqa(do_cleanup=not args.no_cleanup)
+    results = run_temporalqa(do_cleanup=not args.no_cleanup, large=args.large)
 
     print("\n--- TemporalQA Results ---")
     print(f"  Queries:           {results.get('total_queries', 0)}")

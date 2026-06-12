@@ -8,7 +8,6 @@ Layers:
 """
 import hashlib
 import json
-import os
 import shutil
 import argparse
 import subprocess

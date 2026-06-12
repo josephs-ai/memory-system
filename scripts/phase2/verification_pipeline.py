@@ -23,7 +23,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -166,7 +166,7 @@ def get_corroboration(item_id: str, text: str, conn: Any = None) -> Corroboratio
     2. Items with the same entity+property+value slot
     3. Items from different sessions mentioning the same thing
     """
-    content_hash = compute_content_hash(text)
+    compute_content_hash(text)
     record = CorroborationRecord(item_id=item_id)
 
     should_close = False

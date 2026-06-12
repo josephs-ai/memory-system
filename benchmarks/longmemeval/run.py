@@ -73,7 +73,7 @@ def run_longmemeval(
         question_type = entry.get("question_type", "unknown")
         question = entry.get("question", "")
         gold_answer = entry.get("answer", "")
-        sessions = entry.get("sessions", entry.get("history", []))
+        sessions = entry.get("sessions", entry.get("history", entry.get("haystack_sessions", [])))
 
         if not question or not sessions:
             LOGGER.warning("Skipping entry %s: missing question or sessions", question_id)

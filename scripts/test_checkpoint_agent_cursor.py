@@ -1,9 +1,6 @@
 """
 Tests for S1 (cursor) + S2 (classification + replay delta) + S3 (delta gating).
 """
-import json
-import pytest
-from pathlib import Path
 import checkpoint_agent as ca
 
 

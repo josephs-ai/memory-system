@@ -236,3 +236,14 @@ def generate_crud_scenarios() -> list[dict]:
         },
     ]
     return scenarios
+
+
+def generate_crud_scenarios_large(count: int = 100, seed: int = 42) -> list[dict]:
+    """Generate a larger pool of CRUD scenarios for stress testing."""
+    from crud_rag.generator import generate_update_scenarios
+
+    base = generate_crud_scenarios()
+    existing = len(base)
+    extra_needed = max(0, count - existing)
+    generated = generate_update_scenarios(count=extra_needed, seed=seed)
+    return base + generated

@@ -39,9 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 LOGGER = logging.getLogger("openclaw.retrieval_explainer")

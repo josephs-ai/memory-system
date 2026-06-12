@@ -23,7 +23,6 @@ Design principles:
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import re
@@ -275,7 +274,7 @@ def score_authority(item: dict) -> QualityScore:
     """Score the authority basis of the claim."""
     authority = str(item.get("authority_basis", "unknown")).lower()
     role = str(item.get("role", "unknown")).lower()
-    source_agent = str(item.get("source_agent", "unknown")).lower()
+    str(item.get("source_agent", "unknown")).lower()
 
     score = 0.5  # Default moderate
     reason_parts = []
@@ -311,7 +310,7 @@ def score_evidence(item: dict) -> QualityScore:
     text = str(item.get("text", "") or item.get("claim_text", ""))
     source_chunk = str(item.get("source_chunk", ""))
     source_session = str(item.get("source_session", ""))
-    source_agent = str(item.get("source_agent", ""))
+    str(item.get("source_agent", ""))
 
     score = 0.3  # Default low — evidence should be earned
     reason_parts = []

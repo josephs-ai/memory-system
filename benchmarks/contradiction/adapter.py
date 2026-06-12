@@ -219,3 +219,14 @@ def generate_contradiction_scenarios() -> list[dict]:
         },
     ]
     return scenarios
+
+
+def generate_contradiction_scenarios_large(count: int = 100, seed: int = 42) -> list[dict]:
+    """Generate a larger pool of contradiction scenarios for stress testing."""
+    from contradiction.generator import generate_direct_scenarios
+
+    base = generate_contradiction_scenarios()
+    existing = len(base)
+    extra_needed = max(0, count - existing)
+    generated = generate_direct_scenarios(count=extra_needed, seed=seed)
+    return base + generated

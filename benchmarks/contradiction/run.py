@@ -29,7 +29,7 @@ from common import (
     save_results,
     token_f1,
 )
-from contradiction.adapter import generate_contradiction_scenarios
+from contradiction.adapter import generate_contradiction_scenarios, generate_contradiction_scenarios_large
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger("openclaw.benchmarks.contradiction")
@@ -37,9 +37,12 @@ LOGGER = logging.getLogger("openclaw.benchmarks.contradiction")
 SOURCE_AGENT_PREFIX = "benchmark_contradiction"
 
 
-def run_contradiction(do_cleanup: bool = True) -> dict:
+def run_contradiction(do_cleanup: bool = True, large: int = 0) -> dict:
     """Run Contradiction Detection benchmark."""
-    scenarios = generate_contradiction_scenarios()
+    if large > 0:
+        scenarios = generate_contradiction_scenarios_large(count=large)
+    else:
+        scenarios = generate_contradiction_scenarios()
     LOGGER.info("Running %d contradiction scenarios", len(scenarios))
 
     all_results = []
@@ -184,10 +187,11 @@ def run_contradiction(do_cleanup: bool = True) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Contradiction Detection benchmark")
     parser.add_argument("--no-cleanup", action="store_true")
+    parser.add_argument("--large", type=int, default=0, help="Generate N scenarios (0=hand-crafted only)")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
 
-    results = run_contradiction(do_cleanup=not args.no_cleanup)
+    results = run_contradiction(do_cleanup=not args.no_cleanup, large=args.large)
 
     print("\n--- Contradiction Detection Results ---")
     print(f"  Queries:               {results.get('total_queries', 0)}")

@@ -2,8 +2,6 @@
 S4 delta-aware chunking tests.
 Verifies that chunk_by_topic._load_text respects byte offsets.
 """
-import pytest
-from pathlib import Path
 import chunk_by_topic as cbt
 
 

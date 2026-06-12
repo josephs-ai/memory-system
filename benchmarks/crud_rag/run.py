@@ -31,7 +31,7 @@ from common import (
     save_results,
     token_f1,
 )
-from crud_rag.adapter import generate_crud_scenarios
+from crud_rag.adapter import generate_crud_scenarios, generate_crud_scenarios_large
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger("openclaw.benchmarks.crud_rag")
@@ -169,9 +169,12 @@ def evaluate_query(query: dict, *, run_id: str) -> dict:
     }
 
 
-def run_crud_rag(do_cleanup: bool = True) -> dict:
+def run_crud_rag(do_cleanup: bool = True, large: int = 0) -> dict:
     """Run CRUD-RAG benchmark."""
-    scenarios = generate_crud_scenarios()
+    if large > 0:
+        scenarios = generate_crud_scenarios_large(count=large)
+    else:
+        scenarios = generate_crud_scenarios()
     LOGGER.info("Running %d CRUD-RAG scenarios", len(scenarios))
 
     all_query_results = []
@@ -270,10 +273,11 @@ def run_crud_rag(do_cleanup: bool = True) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="CRUD-RAG benchmark")
     parser.add_argument("--no-cleanup", action="store_true")
+    parser.add_argument("--large", type=int, default=0, help="Generate N scenarios (0=hand-crafted only)")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
 
-    results = run_crud_rag(do_cleanup=not args.no_cleanup)
+    results = run_crud_rag(do_cleanup=not args.no_cleanup, large=args.large)
 
     print("\n--- CRUD-RAG Results ---")
     print(f"  Scenarios:         {results.get('total_scenarios', 0)}")

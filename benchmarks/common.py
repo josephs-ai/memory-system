@@ -48,6 +48,32 @@ RESULTS_DIR.mkdir(exist_ok=True)
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _embed_model = None
 
+# Remote GPU inference server (optional).
+# Set GPU_INFERENCE_URL to offload embedding/reranking to a GPU host.
+# Example: GPU_INFERENCE_URL=http://192.168.64.1:9999
+# When unset or unreachable, falls back to local CPU inference.
+GPU_INFERENCE_URL = os.environ.get("GPU_INFERENCE_URL", "")
+_use_remote_gpu = None
+
+
+def _remote_gpu_available() -> bool:
+    global _use_remote_gpu
+    if _use_remote_gpu is None:
+        if not GPU_INFERENCE_URL:
+            _use_remote_gpu = False
+        else:
+            try:
+                import requests
+                r = requests.get(f"{GPU_INFERENCE_URL}/health", timeout=2)
+                _use_remote_gpu = r.status_code == 200
+                if _use_remote_gpu:
+                    LOGGER.info("Remote GPU inference active at %s (device=%s)",
+                                GPU_INFERENCE_URL, r.json().get("device"))
+            except Exception:
+                _use_remote_gpu = False
+                LOGGER.info("Remote GPU inference not available, using local CPU")
+    return _use_remote_gpu
+
 
 # ---------------------------------------------------------------------------
 # Embedding
@@ -64,6 +90,12 @@ def get_embed_model():
 
 
 def embed_texts(texts: list[str]) -> np.ndarray:
+    if _remote_gpu_available():
+        import requests
+        r = requests.post(f"{GPU_INFERENCE_URL}/embed",
+                          json={"texts": texts}, timeout=120)
+        r.raise_for_status()
+        return np.array(r.json()["embeddings"], dtype=np.float32)
     model = get_embed_model()
     return model.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
 
@@ -374,9 +406,21 @@ _reranker_model = None
 def _get_reranker():
     global _reranker_model
     if _reranker_model is None:
-        from sentence_transformers import CrossEncoder
-        _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        LOGGER.info("Loaded cross-encoder reranker: cross-encoder/ms-marco-MiniLM-L-6-v2")
+        if _remote_gpu_available():
+            # Return a lightweight proxy that calls the remote GPU server
+            class _RemoteReranker:
+                def predict(self, pairs):
+                    import requests
+                    r = requests.post(f"{GPU_INFERENCE_URL}/rerank",
+                                      json={"pairs": pairs}, timeout=120)
+                    r.raise_for_status()
+                    return r.json()["scores"]
+            _reranker_model = _RemoteReranker()
+            LOGGER.info("Using remote GPU reranker at %s", GPU_INFERENCE_URL)
+        else:
+            from sentence_transformers import CrossEncoder
+            _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            LOGGER.info("Loaded cross-encoder reranker: cross-encoder/ms-marco-MiniLM-L-6-v2")
     return _reranker_model
 
 

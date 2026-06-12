@@ -1,11 +1,11 @@
 {
   "cursor_version": "v2-hash-window-4096",
-  "path": "/home/joseph-ding/.openclaw/agents/main/sessions/89a01921-014e-493e-ab51-93eefb58bac3.jsonl",
-  "inode": 3295533,
+  "path": "/home/joseph-ding/.openclaw/agents/main/sessions/dc2d0a32-2d96-43ec-9724-8f6ed924f698.jsonl",
+  "inode": 3280334,
   "device": 64770,
-  "size": 4022954,
-  "head_hash": "c4a94aac5e6fdd7f469a1fdcaf44e84626e83b05d120e8b087eac76eccd864bd",
-  "tail_hash": "97a4e34426618ab9210edc7f1114374d4a3259894783090f5f381663898f062e",
-  "processed_offset": 4006975,
-  "committed_offset": 4006975
+  "size": 177057,
+  "head_hash": "34a7edfd1c3dd25519ab8f5e575d3c126bcc4998170d4db3b67a78706f7119a6",
+  "tail_hash": "85ab414c4fee3af554cfea8d48828c36aed778f814cbf11281147d9a09380c5b",
+  "processed_offset": 177057,
+  "committed_offset": 177057
 }

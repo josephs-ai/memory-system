@@ -1,6 +1,4 @@
-import pytest
 import json
-from pathlib import Path
 from dehydrate_transcript import load_events
 
 def test_malformed_jsonl_tail_ignored(tmp_path):
@@ -12,7 +10,7 @@ def test_malformed_jsonl_tail_ignored(tmp_path):
         '{"type": "message", "message": {"role": "user", "content": [{"type": "text", "te' # malformed tail
     ]
     transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    
+
     events = load_events(transcript, offset=0)
     assert len(events) == 2
     assert events[0]["message"]["role"] == "user"

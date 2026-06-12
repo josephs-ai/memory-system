@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -179,8 +178,7 @@ def build_visibility_filter(
 
     Returns a dict with 'where_clause' and 'params' for use in queries.
     """
-    layers = get_visible_layers(agent_id, agent_role, project_id)
-    layer_values = [l.value for l in layers]
+    _layers = get_visible_layers(agent_id, agent_role, project_id)  # noqa: F841
 
     conditions = []
     params: list[Any] = []

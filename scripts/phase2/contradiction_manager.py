@@ -23,11 +23,9 @@ DB schema additions (applied via migrate):
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -493,7 +491,7 @@ def resolve_contradiction(
             """, (resolution.value, reason, resolved_by, eid))
 
             # Apply resolution effects
-            now_str = datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()
 
             if resolution == ResolutionState.A_WINS:
                 cur.execute("""
