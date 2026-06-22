@@ -53,6 +53,20 @@ def test_slot_match_suppressed_and_overridable():
     assert R.fast_candidate_matches_rejected(high, tm, sm) is False
 
 
+def test_missing_prior_confidence_is_non_overridable():
+    # A discard with no stored confidence must NOT be overridable by the
+    # default extractor confidence (~0.5); it stays suppressed for the window.
+    tm, sm = _idx([{"text": "x likes y"}])  # no 'confidence' key
+    assert R.fast_candidate_matches_rejected({"text": "x likes y", "confidence": 0.5}, tm, sm) is True
+    assert R.fast_candidate_matches_rejected({"text": "x likes y", "confidence": 0.99}, tm, sm) is True
+
+
+def test_explicit_zero_confidence_is_overridable():
+    # An explicit 0.0 (vs missing) is still overridable by stronger evidence.
+    tm, sm = _idx([{"text": "x likes y", "confidence": 0.0}])
+    assert R.fast_candidate_matches_rejected({"text": "x likes y", "confidence": 0.9}, tm, sm) is False
+
+
 def test_window_disabled_never_suppresses(monkeypatch):
     monkeypatch.setattr(R, "REJECT_WINDOW_DAYS", 0)
     tm, sm = _idx([{"text": "x likes y", "confidence": 0.0}])

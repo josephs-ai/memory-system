@@ -646,14 +646,9 @@ def fetch_discarded_payloads(within_days: int | None = None):
                     "WHERE discarded_at IS NULL OR discarded_at > now() - make_interval(days => %s)",
                     (within_days,),
                 )
-            out = []
-            for payload, discarded_at in cur.fetchall():
-                if isinstance(payload, dict) and discarded_at is not None:
-                    # Surface the rejection timestamp so the matcher can apply
-                    # confidence-aware re-entry without a second query.
-                    payload.setdefault("_discarded_at", discarded_at.isoformat())
-                out.append(payload)
-            return out
+            # Recency windowing is applied in SQL above; the matcher only needs
+            # the payload (text/slot/confidence), so we discard discarded_at here.
+            return [payload for payload, _discarded_at in cur.fetchall()]
 
 
 def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:

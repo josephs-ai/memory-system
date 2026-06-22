@@ -121,14 +121,22 @@ def build_rejected_index(discarded_payloads: list[dict]) -> tuple[dict, dict]:
     slot_map: dict[tuple, float] = {}
 
     def _record(d: dict, key, conf: float):
+        # Keep the strongest prior confidence for a key. A stored sentinel of
+        # None means "discarded without a confidence" — never let such a reject
+        # be overridden by the confidence margin (treated as +inf below).
         if key in d:
-            if conf > d[key]:
+            cur = d[key]
+            if cur is None:
+                return
+            if conf is None or conf > cur:
                 d[key] = conf
         else:
             d[key] = conf
 
     for old in discarded_payloads:
-        conf = float(old.get("confidence") or 0.0)
+        # Distinguish "discarded with confidence 0.0" from "no confidence stored".
+        raw_conf = old.get("confidence")
+        conf = None if raw_conf is None else float(raw_conf)
         old_text = (old.get("text") or "").strip().lower()
         if old_text:
             _record(text_map, old_text, conf)
@@ -152,7 +160,12 @@ def fast_candidate_matches_rejected(item: dict, text_map: dict, slot_map: dict) 
 
     new_conf = float(item.get("confidence") or 0.0)
 
-    def _still_suppressed(prior_conf: float) -> bool:
+    def _still_suppressed(prior_conf: float | None) -> bool:
+        # A reject with no stored confidence is non-overridable: we have no
+        # basis to claim the new evidence is "stronger", so keep suppressing
+        # for the full recency window.
+        if prior_conf is None:
+            return True
         # Allow re-entry if the new evidence is materially stronger.
         return new_conf < (prior_conf + REJECT_CONF_OVERRIDE_MARGIN)
 
