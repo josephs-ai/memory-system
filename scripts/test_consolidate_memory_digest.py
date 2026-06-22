@@ -117,6 +117,42 @@ def test_unroutable_goes_to_misc_not_dropped(env):
     assert "xyzzy" in node.read_text()
 
 
+def test_provenance_sections_do_not_pollute_digests(env):
+    """Tester-found bug: daily roll-ups inline each session card's ## Provenance
+    (transcript path, event count, span). Those machine-metadata bullets must NOT
+    flow into systems/misc or any digest node."""
+    d, cmp, root = env
+    body = (
+        "# Daily roll-up: builder — 2026-06-20\n"
+        "## Session abc123  (freshness: fresh)\n"
+        "# Session Card: builder — 2026-06-20\n"
+        "## Decisions\n"
+        "- (did) shipped phase 4\n"
+        "## Provenance\n"
+        "- transcript: /home/x/.openclaw/agents/builder/sessions/abc123.jsonl\n"
+        "- events: 352\n"
+        "- span: 2026-06-20T08:00Z .. 2026-06-20T09:00Z\n"
+    )
+    _rollup(cmp, "builder", "2026-06-20", body)
+    d.run_auto_dream(since_days=3650, agent="builder")
+    # the real decision survives
+    dec = cmp.digest_node("decisions", "decisions", ensure=False)
+    assert "shipped phase 4" in dec.read_text()
+    # provenance noise must NOT appear anywhere in any digest node
+    for kind in cmp.DIGEST_KINDS:
+        ddir = cmp.digest_dir(kind, ensure=False)
+        if not ddir.is_dir():
+            continue
+        for node in ddir.glob("*.md"):
+            text = node.read_text()
+            # strip the node's OWN provenance section before asserting (that's
+            # legitimate, structural — not inlined card metadata)
+            understanding = text.split("## Provenance")[0]
+            assert "abc123.jsonl" not in understanding
+            assert "events: 352" not in understanding
+            assert ".. 2026-06-20T09:00Z" not in understanding
+
+
 def test_frontmatter_and_freshness(env):
     d, cmp, root = env
     _rollup(cmp, "builder", "2026-06-20", _DAY1)

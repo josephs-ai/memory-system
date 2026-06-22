@@ -52,6 +52,15 @@ SECTION_TO_KIND = {
     "next step": ("decisions", "open-threads"),
 }
 
+# Sections whose bullets are pure machine metadata, not knowledge. The session
+# card's Provenance (transcript path / event count / span) and roll-up scaffolding
+# are already captured structurally in each digest node's own provenance, so their
+# bullets must NOT flow into the compounded understanding (they were polluting
+# systems/misc with file paths + event counts). Matched case-insensitively; a
+# "## Session <id>" roll-up header is also metadata.
+_IGNORE_SECTIONS = {"provenance", "day index"}
+_IGNORE_SECTION_PREFIXES = ("session ", "daily roll-up", "boot pack")
+
 # Keyword fallbacks for bullets that arrive without a clear section context.
 _KEYWORD_KIND = [
     (re.compile(r"\b(decide|decision|approv|will|plan to|agreed)\b", re.I), ("decisions", "decisions")),
@@ -110,10 +119,24 @@ def _iter_card_sections(text: str):
         yield current, buf
 
 
+def _is_ignored_section(title: str) -> bool:
+    key = title.strip().lower().lstrip("# ").strip()
+    if key in _IGNORE_SECTIONS:
+        return True
+    return any(key.startswith(p) for p in _IGNORE_SECTION_PREFIXES)
+
+
 def route_card_text(text: str) -> dict[tuple[str, str], list[str]]:
-    """Map a card/roll-up's bullets into digest (kind, slug) buckets."""
+    """Map a card/roll-up's bullets into digest (kind, slug) buckets.
+
+    Metadata sections (Provenance, roll-up/session headers) are skipped entirely
+    so machine bookkeeping (transcript paths, event counts, spans) never pollutes
+    the compounded understanding — that bookkeeping lives in each node's own
+    provenance, derived structurally."""
     buckets: dict[tuple[str, str], list[str]] = {}
     for title, bullets in _iter_card_sections(text):
+        if _is_ignored_section(title):
+            continue
         kind, slug = route_section(title)
         for b in bullets:
             target = (kind, slug) if kind else route_bullet(b)
