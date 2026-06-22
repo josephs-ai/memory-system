@@ -54,8 +54,27 @@ _BLOCKER_RE = re.compile(
 _NEXT_RE = re.compile(r"(want me to|next step|shall i|should i|do you want|standing by|"
                       r"on approval|let me know)", re.IGNORECASE)
 # Only match commands that actually INVOKE a test runner, not any command that
-# merely mentions a test_*.py path (e.g. `git log` over a branch named test_...).
+# merely mentions a test_*.py path (e.g. `git log` over a branch named test_...)
+# nor a command that only *talks about* pytest (echo/grep/cat/comments).
 _TEST_RE = re.compile(r"(\bpytest\b|\bunittest\b|-m\s+pytest|python[0-9.]*\s+-m\s+pytest)", re.IGNORECASE)
+# A segment is a "talking about" segment if it merely prints/searches/comments.
+_NON_RUNNER_HEAD = re.compile(r"^(#|(echo|printf|grep|rg|cat|less|sed|awk|head|tail)\b)", re.IGNORECASE)
+
+
+def _command_invokes_tests(cmd: str) -> bool:
+    """True only if a shell segment actually runs a test runner. Splits on shell
+    separators so `echo x && pytest ...` still counts, but `echo 'run pytest'`,
+    `grep pytest setup.cfg`, and `# pytest is great` do not."""
+    # Split on ; && || | and newlines into individual command segments.
+    for seg in re.split(r"(?:&&|\|\||[;|\n])", cmd):
+        seg = seg.strip()
+        if not seg or _NON_RUNNER_HEAD.match(seg):
+            continue
+        # Strip a leading `cd ... &&`-style prefix already handled by split; check
+        # the segment head token chain for an actual runner invocation.
+        if _TEST_RE.search(seg):
+            return True
+    return False
 _PASS_TAIL_RE = re.compile(r"(\d+\s+passed[^\n]*|\d+\s+failed[^\n]*|\bFAILED\b[^\n]*)")
 
 
@@ -96,7 +115,7 @@ def extract_tests_run(events: list[dict[str, Any]]) -> list[str]:
         if tc.get("name") == "exec":
             args = tc.get("arguments") or tc.get("input") or {}
             cmd = str(args.get("command") or "")
-            if _TEST_RE.search(cmd):
+            if _command_invokes_tests(cmd):
                 first = " ".join(cmd.split())[:160]
                 if first not in cmds:
                     cmds.append(first)
@@ -139,10 +158,19 @@ def _strip_md(text: str) -> str:
     return " ".join(text.replace("**", "").replace("*", "").split()).strip(" -:")
 
 
-def extract_decisions(events: list[dict[str, Any]], *, cap: int = 8) -> list[str]:
-    decisions: list[str] = []
+def _starts_commitment(text: str) -> bool:
+    """True only when a commitment marker is at the START of the (md-stripped) text.
+    Prevents mis-tagging analytical sentences like 'This added complexity is...'
+    as a commitment just because they contain a marker word mid-sentence."""
+    head = _strip_md(text).lower()
+    return any(head.startswith(m) for m in _COMMIT_MARKERS)
+
+
+def extract_decisions(events: list[dict[str, Any]], *, cap: int = 10) -> list[str]:
+    # Collect both kinds separately so a chatty user can't starve the assistant
+    # commitments (or vice-versa); then merge with a balanced share of the cap.
+    user_items: list[str] = []
     seen_user: set[str] = set()
-    # user directives: short, imperative-ish, cleaned + deduped (webchat double-delivers)
     for t in _user_texts(events):
         c = _clean_user_directive(t)
         if not c:
@@ -150,16 +178,24 @@ def extract_decisions(events: list[dict[str, Any]], *, cap: int = 8) -> list[str
         key = c.lower()
         if len(c) <= 200 and key not in seen_user:
             seen_user.add(key)
-            decisions.append(f"(user) {c}")
-    # assistant commitments
+            user_items.append(f"(user) {c}")
+
+    did_items: list[str] = []
     for t in _assistant_texts(events):
-        low = t.lower()
-        if any(low.startswith(m) or m in low[:40] for m in _COMMIT_MARKERS):
-            snippet = _strip_md(t)[:200]
-            tag = f"(did) {snippet}"
-            if tag not in decisions:
-                decisions.append(tag)
-    return decisions[:cap]
+        first_line = t.strip().splitlines()[0] if t.strip() else ""
+        if _starts_commitment(t) or _starts_commitment(first_line):
+            tag = f"(did) {_strip_md(t)[:200]}"
+            if tag not in did_items:
+                did_items.append(tag)
+
+    # Reserve up to half the cap for each side; backfill from whichever has more.
+    half = cap // 2
+    merged = user_items[:half] + did_items[:half]
+    if len(merged) < cap:
+        merged += user_items[half:half + (cap - len(merged))]
+    if len(merged) < cap:
+        merged += did_items[half:half + (cap - len(merged))]
+    return merged[:cap]
 
 
 def extract_blockers(events: list[dict[str, Any]], *, cap: int = 6) -> list[str]:
@@ -193,9 +229,8 @@ def extract_summary(events: list[dict[str, Any]], *, cap: int = 6) -> list[str]:
     for t in _assistant_texts(events):
         for line in t.splitlines():
             s = line.strip()
-            low = s.lower()
             is_header = s.startswith("#") or s.startswith("**")
-            is_commit = any(m in low[:40] for m in _COMMIT_MARKERS)
+            is_commit = _starts_commitment(s)
             if (is_header or is_commit) and len(s) > 6:
                 clean = _strip_md(s.lstrip("#"))[:180]
                 if clean and clean not in out:

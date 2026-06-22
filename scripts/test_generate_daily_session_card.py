@@ -145,15 +145,43 @@ def test_tests_run_ignores_non_runner_commands(env):
         _msg("assistant", [
             {"type": "toolCall", "name": "exec",
              "arguments": {"command": "git log main..fix/test_branch --oneline"}},
+            # talk-about cases that must NOT count as a test run:
             {"type": "toolCall", "name": "exec",
-             "arguments": {"command": "pytest -q test_real.py"}},
+             "arguments": {"command": "echo 'remember to run pytest later'"}},
+            {"type": "toolCall", "name": "exec",
+             "arguments": {"command": "grep pytest setup.cfg"}},
+            {"type": "toolCall", "name": "exec",
+             "arguments": {"command": "# pytest is great"}},
+            # the real one (also exercises the cd && pytest segment split):
+            {"type": "toolCall", "name": "exec",
+             "arguments": {"command": "cd scripts && pytest -q test_real.py"}},
         ]),
     ]
     tp = tmp / "agents" / "b" / "sessions" / "t.jsonl"
     _write_transcript(tp, events)
     m = g.build_card("b", tp)
-    assert len(m.tests_run) == 1
+    assert len(m.tests_run) == 1, m.tests_run
     assert "pytest" in m.tests_run[0]
+
+
+def test_decisions_no_midsentence_commitment_false_positive(env):
+    g, cmp, root, tmp = env
+    events = [
+        _msg("assistant", [
+            {"type": "text", "text": "This added complexity is concerning and not "
+                                     "something I did."}],
+             "2026-06-22T09:00:00.000Z"),
+        _msg("assistant", [
+            {"type": "text", "text": "Fixed the parser and committed."}],
+             "2026-06-22T09:01:00.000Z"),
+    ]
+    tp = tmp / "agents" / "b" / "sessions" / "c.jsonl"
+    _write_transcript(tp, events)
+    m = g.build_card("b", tp)
+    did = [d for d in m.decisions if d.startswith("(did)")]
+    assert len(did) == 1, did
+    assert "fixed the parser" in did[0].lower()
+    assert not any("added complexity is concerning" in d.lower() for d in did)
 
 
 def test_daily_rollup_and_index(env):
