@@ -447,6 +447,70 @@ def check_daily_cards_fresh(cfg: dict) -> Check:
         return Check("daily_cards_fresh", WARN, f"daily-card check unavailable: {e}", None, "")
 
 
+def check_boot_packs_generated(cfg: dict) -> Check:
+    """Phase 3: active agents have a recent, non-degraded boot pack. OK if every
+    agent that has session cards today also has a fresh boot pack generated within
+    24h; WARN if a boot pack is missing/stale/degraded; SKIP if the canonical
+    layout isn't scaffolded."""
+    import re
+    from datetime import datetime, timezone
+
+    try:
+        import canonical_memory_paths as cmp
+
+        if not cmp.layout_present():
+            return Check("boot_packs_generated", SKIP, "canonical layout not scaffolded", None, "")
+
+        day = cmp.today_utc()
+        ddir = cmp.daily_dir(day, ensure=False)
+        active_agents = []
+        if ddir.exists():
+            active_agents = [p.stem for p in ddir.glob("*.md") if p.name != "_index.md"]
+        if not active_agents:
+            return Check("boot_packs_generated", SKIP, "no active agents today", 0, str(ddir))
+
+        now = datetime.now(timezone.utc)
+        missing, stale, degraded, ok = [], [], [], 0
+        for agent in active_agents:
+            bp = cmp.session_dir(agent) / "_BOOT_PACK.md"
+            if not bp.exists():
+                missing.append(agent)
+                continue
+            head = bp.read_text(encoding="utf-8", errors="ignore")[:600]
+            if "freshness: degraded" in head:
+                degraded.append(agent)
+                continue
+            m = re.search(r"generated_at:\s*([0-9T:\-]+Z)", head)
+            fresh = False
+            if m:
+                try:
+                    gen = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+                    fresh = (now - gen).total_seconds() < 24 * 3600
+                except ValueError:
+                    fresh = False
+            if fresh:
+                ok += 1
+            else:
+                stale.append(agent)
+
+        if missing or degraded or stale:
+            parts = []
+            if missing:
+                parts.append(f"missing={missing}")
+            if degraded:
+                parts.append(f"degraded={degraded}")
+            if stale:
+                parts.append(f"stale={stale}")
+            return Check("boot_packs_generated", WARN,
+                         f"{ok}/{len(active_agents)} fresh; " + ", ".join(parts),
+                         ok, str(cmp.canonical_root()))
+        return Check("boot_packs_generated", OK,
+                     f"{ok}/{len(active_agents)} agent boot pack(s) fresh", ok,
+                     str(cmp.canonical_root()))
+    except Exception as e:  # noqa: BLE001
+        return Check("boot_packs_generated", WARN, f"boot-pack check unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -488,10 +552,10 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_embeddings_provider_healthy,
     check_canonical_layout_present,
     check_daily_cards_fresh,
+    check_boot_packs_generated,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
-    _placeholder("boot_packs_generated", "Phase 3"),
     _placeholder("digest_fresh", "Phase 4"),
     _placeholder("auto_dream_last_run", "Phase 4"),
 ]
