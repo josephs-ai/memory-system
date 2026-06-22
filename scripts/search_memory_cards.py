@@ -190,10 +190,25 @@ def search_cards(
     semantic_bonus: dict[str, float] = {}
     if semantic_blend is not None:
         try:
-            semantic_bonus = semantic_blend(query, pool) or {}
+            raw_bonus = semantic_blend(query, pool)
+            # The service may MISBEHAVE without raising: return a non-dict, or a
+            # dict with non-numeric scores. Sanitize defensively — a junk response
+            # must degrade to lexical, never crash (the whole degradation promise).
+            if raw_bonus is None:
+                raw_bonus = {}
+            if not isinstance(raw_bonus, dict):
+                raise TypeError(f"semantic blend returned {type(raw_bonus).__name__}, expected dict")
+            clean: dict[str, float] = {}
+            for k, v in raw_bonus.items():
+                try:
+                    clean[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue  # drop un-coercible score, keep the rest
+            semantic_bonus = clean
             diag["mode"] = "hybrid"
         except Exception as exc:  # noqa: BLE001 — degrade, never crash search
             diag["degraded"] = True
+            semantic_bonus = {}
             diag["notes"].append(f"semantic blend unavailable, lexical-only: {exc}")
     else:
         diag["notes"].append("semantic blend not requested (lexical-only)")
@@ -205,17 +220,19 @@ def search_cards(
         if s > 0.0:
             scored.append(SearchHit(record=r, score=s, snippet=_make_snippet(r, qtok)))
 
+    # Single deterministic sort. Within equal score+freshness we want NEWER cards
+    # first (generated_at DESC). Strings sort ascending, so invert with a key that
+    # makes later timestamps compare "smaller" (negate each codepoint). Empty/partial
+    # stamps fall back cleanly; id is the final stable tiebreak.
+    def _desc_str(s: str) -> tuple[int, ...]:
+        return tuple(-ord(c) for c in s)
+
     scored.sort(key=lambda h: (
         -h.score,
         _FRESHNESS_RANK.get(h.record.freshness, 9),
-        # newer first within ties -> invert lexicographic stamp via reverse later
-        h.record.generated_at,
+        _desc_str(h.record.generated_at or ""),
         h.record.id,
     ))
-    # apply generated_at-desc within identical score+freshness without disturbing
-    # the primary order: stable sort by (-score, freshness) already done; re-stable
-    # by generated_at desc as a secondary pass keeps determinism.
-    scored.sort(key=lambda h: (-h.score, _FRESHNESS_RANK.get(h.record.freshness, 9)))
     diag["matched"] = len(scored)
     return scored[:top_k], diag
 

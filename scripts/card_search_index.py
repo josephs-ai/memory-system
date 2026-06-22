@@ -145,16 +145,25 @@ def iter_card_files(root: Path | None = None):
     daily_root = base / "daily"
     digest_root = base / "digest"
 
+    # Boot packs are derived orientation artifacts, never source knowledge — exclude
+    # them wherever they appear, not just under session/.
+    def _is_boot_pack(p: Path) -> bool:
+        return p.name == "_BOOT_PACK.md"
+
     if session_root.is_dir():
         for p in sorted(session_root.rglob("*.md")):
-            if p.name == "_BOOT_PACK.md":
+            if _is_boot_pack(p):
                 continue
             yield "session", p
     if daily_root.is_dir():
         for p in sorted(daily_root.rglob("*.md")):
+            if _is_boot_pack(p):
+                continue
             yield "daily", p
     if digest_root.is_dir():
         for p in sorted(digest_root.rglob("*.md")):
+            if _is_boot_pack(p):
+                continue
             yield "digest", p
 
 
@@ -275,13 +284,19 @@ def load_index() -> tuple[dict, list[CardRecord]]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # A line can be valid JSON yet not an object (e.g. a bare scalar/list left
+        # by a truncated/partial write). Only dict lines are meaningful; anything
+        # else is skipped, never fatal — the whole point is the readable-search
+        # path must survive a corrupt index.
+        if not isinstance(obj, dict):
+            continue
         if "_index_meta" in obj:
-            meta = obj["_index_meta"]
+            meta = obj["_index_meta"] if isinstance(obj["_index_meta"], dict) else {}
             continue
         try:
             records.append(CardRecord(**obj))
-        except TypeError:
-            # unknown/missing fields -> skip this record, keep going
+        except (TypeError, ValueError):
+            # unknown/missing/mistyped fields -> skip this record, keep going
             continue
     return meta, records
 

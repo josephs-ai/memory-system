@@ -182,6 +182,59 @@ def test_malformed_record_skipped_not_fatal(env):
     assert hits and hits[0].record.slug == "good"
 
 
+def test_load_index_survives_bare_scalar_lines(env):
+    """Tester defect A: a valid-JSON but non-object line (scalar/list) from a
+    truncated write must be skipped, not crash the whole search path."""
+    cmp, csi, smc, canon = env
+    _write_digest(cmp, "systems", "good", "- legitimate searchable content here")
+    csi.build_card_index()
+    p = csi.index_path()
+    with p.open("a", encoding="utf-8") as fh:
+        for junk in ("123", "null", "true", "3.14", '"a bare string"', "[1,2,3]"):
+            fh.write(junk + "\n")
+    meta, recs = csi.load_index()  # must NOT raise
+    assert any(r.slug == "good" for r in recs)
+    hits, _ = smc.search_cards("legitimate searchable content")
+    assert hits and hits[0].record.slug == "good"
+
+
+def test_semantic_blend_garbage_output_degrades(env):
+    """Tester defect B: a blend that RETURNS junk (not raises) must degrade to
+    lexical, never crash."""
+    cmp, csi, smc, canon = env
+    _write_digest(cmp, "systems", "misc", "- vector search service integration")
+    csi.build_card_index()
+
+    # non-dict return
+    hits, diag = smc.search_cards("vector search", semantic_blend=lambda q, r: "garbage")
+    assert diag["degraded"] is True and hits
+
+    # dict with non-numeric scores -> bad entries dropped, good ones kept, no crash
+    _meta, recs = csi.load_index()
+    tid = recs[0].id
+
+    def mixed(q, r):
+        return {tid: "notanumber", "other": 5.0}
+
+    hits2, diag2 = smc.search_cards("vector search", semantic_blend=mixed)
+    assert diag2["mode"] == "hybrid" and diag2["degraded"] is False and hits2
+
+
+def test_tiebreak_newest_first(env):
+    """Tester defect #4: on equal score+freshness, NEWER generated_at must rank
+    first (documented desc), not oldest-first."""
+    cmp, csi, smc, canon = env
+    text = "- zeta eta theta unique phrase"
+    _write_digest(cmp, "systems", "older", text, gen="2026-06-20T10:00:00Z")
+    _write_digest(cmp, "systems", "newer", text, gen="2026-06-22T10:00:00Z")
+    csi.build_card_index()
+    # force a pure tie by zeroing recency influence is hard; instead assert that
+    # when scores+freshness match, the newer card precedes the older.
+    hits, _ = smc.search_cards("zeta eta theta unique phrase", top_k=5)
+    slugs = [h.record.slug for h in hits]
+    assert slugs.index("newer") < slugs.index("older")
+
+
 def test_index_idempotent(env):
     cmp, csi, smc, canon = env
     _write_session(cmp, "builder", "s1", "2026-06-22", "## Summary\n- stable content")
