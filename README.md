@@ -2,7 +2,7 @@
 
 **Long-term memory for AI agents that actually works.** Hybrid retrieval, temporal reasoning, contradiction resolution, self-improving feedback — no LLM in the retrieval loop.
 
-[![CI](https://github.com/josephs-ai/memory-system/actions/workflows/ci.yml/badge.svg)](https://github.com/josephs-ai/memory-system/actions)
+[![CI](https://github.com/josephs-ai/Engram/actions/workflows/ci.yml/badge.svg)](https://github.com/josephs-ai/Engram/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
@@ -165,8 +165,8 @@ idempotent recovery sweep for historically orphaned rotations.
 
 ```bash
 # 1. Start infrastructure
-git clone https://github.com/josephs-ai/memory-system.git
-cd memory-system
+git clone https://github.com/josephs-ai/Engram.git
+cd Engram
 docker compose up -d   # PostgreSQL, Qdrant, Neo4j
 
 # 2. Install
