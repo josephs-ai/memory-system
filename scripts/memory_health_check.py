@@ -396,6 +396,27 @@ def check_search_service_healthy(cfg: dict) -> Check:
     return Check("search_service_healthy", OK if ok else FAIL, detail, ok, url)
 
 
+def check_canonical_layout_present(cfg: dict) -> Check:
+    """Phase 1: the canonical memory tree (session/daily/digest/resources/metadata)
+    is scaffolded. Warn (not fail) if missing — startup is still usable from the
+    timeline layer; this just means the readable canonical layer isn't set up."""
+    try:
+        import canonical_memory_paths as cmp  # local import; optional dependency
+
+        root = cmp.canonical_root()
+        if cmp.layout_present():
+            return Check("canonical_layout_present", OK, f"scaffolded at {root}", str(root), str(root))
+        return Check(
+            "canonical_layout_present",
+            WARN,
+            f"canonical tree not scaffolded (run scaffold_canonical_memory.py); {root}",
+            str(root),
+            str(root),
+        )
+    except Exception as e:  # noqa: BLE001
+        return Check("canonical_layout_present", WARN, f"canonical paths unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -435,6 +456,7 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_neo4j_reachable,
     check_search_service_healthy,
     check_embeddings_provider_healthy,
+    check_canonical_layout_present,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
