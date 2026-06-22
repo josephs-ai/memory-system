@@ -10,7 +10,14 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
-DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
+# Resolve DSN via the single canonical resolver so this core data layer honors
+# BOTH env var names (OPENCLAW_MEMORY_DSN and OPENCLAW_MEMORY_DB_DSN) with one
+# shared default — previously this read only OPENCLAW_MEMORY_DB_DSN, diverging
+# from the ~30 scripts that read OPENCLAW_MEMORY_DSN and causing silent
+# identity drift between modules in the same deployment / in CI.
+from config import resolve_db_dsn
+
+DEFAULT_DSN = resolve_db_dsn()
 
 POOL = ConnectionPool(
     conninfo=DEFAULT_DSN,
@@ -618,11 +625,35 @@ def all_feedback_item_ids():
             )
             return [row[0] for row in cur.fetchall()]
 
-def fetch_discarded_payloads():
+def fetch_discarded_payloads(within_days: int | None = None):
+    """Fetch discarded payloads for the rejection-match gate.
+
+    Historically this returned the ENTIRE memory_discarded table (500k+ rows),
+    which (a) made every routing pass O(table) and (b) turned every past
+    rejection into a permanent ban: once a claim was discarded, any future
+    re-extraction matched and was suppressed forever, even with more context
+    or higher confidence. We now window by recency so rejections age out and
+    a claim can re-enter the pipeline after the window. Pass within_days=None
+    to restore the legacy "all rows" behavior.
+    """
     with POOL.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT payload FROM memory_discarded")
-            return [row[0] for row in cur.fetchall()]
+            if within_days is None:
+                cur.execute("SELECT payload, discarded_at FROM memory_discarded")
+            else:
+                cur.execute(
+                    "SELECT payload, discarded_at FROM memory_discarded "
+                    "WHERE discarded_at IS NULL OR discarded_at > now() - make_interval(days => %s)",
+                    (within_days,),
+                )
+            out = []
+            for payload, discarded_at in cur.fetchall():
+                if isinstance(payload, dict) and discarded_at is not None:
+                    # Surface the rejection timestamp so the matcher can apply
+                    # confidence-aware re-entry without a second query.
+                    payload.setdefault("_discarded_at", discarded_at.isoformat())
+                out.append(payload)
+            return out
 
 
 def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:
@@ -829,6 +860,29 @@ def upsert_memory_embedding(memory_id: str, model_name: str, embedding: list[flo
         conn.commit()
 
 
+def upsert_memory_embeddings_batch(
+    items: list[tuple[str, str, list[float]]],
+):
+    """Bulk upsert embeddings. Each tuple is (memory_id, model_name, embedding).
+    Single connection, single commit."""
+    if not items:
+        return
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO memory_item_embeddings (memory_id, model_name, embedding, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (memory_id) DO UPDATE SET
+                    model_name = EXCLUDED.model_name,
+                    embedding = EXCLUDED.embedding,
+                    updated_at = now()
+                """,
+                items,
+            )
+        conn.commit()
+
+
 def fetch_memory_items_for_embedding(status: str = "active"):
     with POOL.connection() as conn:
         with conn.cursor() as cur:
@@ -857,7 +911,10 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     freshness_class,
                     source_agent,
                     source_session,
-                    source_chunk
+                    source_chunk,
+                    last_confirmed,
+                    first_seen,
+                    created_at
                 FROM memory_items
                 WHERE status = %s
                 ORDER BY id
@@ -891,6 +948,9 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     "source_agent": row[20],
                     "source_session": row[21],
                     "source_chunk": row[22],
+                    "last_confirmed": row[23],
+                    "first_seen": row[24],
+                    "created_at": row[25],
                 }
                 for row in rows
             ]

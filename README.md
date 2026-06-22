@@ -2,7 +2,7 @@
 
 **Long-term memory for AI agents that actually works.** Hybrid retrieval, temporal reasoning, contradiction resolution, self-improving feedback — no LLM in the retrieval loop.
 
-[![CI](https://github.com/josephs-ai/Memory-System-claw/actions/workflows/ci.yml/badge.svg)](https://github.com/josephs-ai/Memory-System-claw/actions)
+[![CI](https://github.com/josephs-ai/memory-system/actions/workflows/ci.yml/badge.svg)](https://github.com/josephs-ai/memory-system/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
@@ -108,12 +108,55 @@ candidate ──► durable ──► superseded (replaced by newer fact)
                  └──── re-confirmed (still true)
 ```
 
+### Ingestion Pipeline
+
+Retrieval is only half the system. Memory has to get *written* first. The
+write path is a deterministic, LLM-free checkpoint pipeline that turns raw
+agent transcripts into routed, embedded memory items:
+
+```
+ session transcript (*.jsonl)
+        │
+        ▼
+ ┌──────────────┐   S1: strong cursor (inode/device/hash + newline-safe offset)
+ │ checkpoint_  │   S2: replay-window delta — only new bytes since last commit
+ │ agent.py     │   S3: delta-aware dehydration (atomic, UUID-scoped temp)
+ └──────┬───────┘   S4: delta-aware topic chunking
+        ▼
+ extract_chunk_updates.py ──► structured claims (deterministic, cached)
+        ▼
+ route_memory_items_batch.py
+        │   decide_route():  AUTO | INBOX | PENDING_STABLE | DISCARDED
+        ▼
+ process_auto_memory_items.py ──► write_memory_item.py ──► PostgreSQL + Qdrant
+```
+
+**Routing & re-entry semantics.** Candidate ids are a deterministic hash of
+`(chunk | claim_text)`. The router only hard-skips ids that already live in an
+*active* table (`memory_items`, `memory_inbox`, `memory_pending_stable`) — **not**
+the discard table. Rejections are handled by a separate, recency-windowed gate
+so a once-discarded claim can re-enter the pipeline when it ages out or comes
+back with materially higher confidence. Below-threshold items soft-hold in the
+Inbox rather than being permanently discarded.
+
+> **Why this matters:** treating "discarded" as a permanent ban (and keying the
+> dedup gate off it) silently dropped re-extracted memory forever. The gate is
+> now confidence- and recency-aware. See `route_memory_items_batch.py`.
+
+**Rotation-safe ingestion.** OpenClaw rotates a live session by renaming it to
+`<uuid>.jsonl.deleted.<timestamp>` rather than hard-deleting it. The checkpoint
+discovery (`find_pending_transcripts_for_agent`) follows the active session
+**plus** any recently-rotated file that still has bytes past its committed
+cursor, so a rotation while the agent is running no longer drops the
+un-checkpointed tail. `backfill_rotated_transcripts.py` is a one-time,
+idempotent recovery sweep for historically orphaned rotations.
+
 ### Storage Layer
 
 | Store | Role | Scale |
 |---|---|---|
-| **PostgreSQL** | Memory items, FTS index, metadata, lifecycle state | 18K+ items |
-| **Qdrant** | 384-dim vector index (all-MiniLM-L6-v2) | Tested to 100K |
+| **PostgreSQL** | Memory items, FTS index, metadata, lifecycle state | 237K+ items |
+| **Qdrant** | 384-dim vector index (all-MiniLM-L6-v2) | 230K+ live points, tested to 100K NIAH |
 | **Neo4j** | Knowledge graph — SUPERSEDES, CONTRADICTS, CAUSED_BY, etc. | Typed relationships |
 
 ---
@@ -122,8 +165,8 @@ candidate ──► durable ──► superseded (replaced by newer fact)
 
 ```bash
 # 1. Start infrastructure
-git clone https://github.com/josephs-ai/Memory-System-claw.git
-cd Memory-System-claw
+git clone https://github.com/josephs-ai/memory-system.git
+cd memory-system
 docker compose up -d   # PostgreSQL, Qdrant, Neo4j
 
 # 2. Install
@@ -229,7 +272,10 @@ scripts/
 ├── memory_knowledge_graph.py     # Semantic links (Neo4j)
 ├── consolidation_grouper.py      # Progressive summarization
 ├── dehydrate_transcript.py       # Transcript → clean text
-├── checkpoint_agent.py           # Agent memory checkpointing
+├── checkpoint_agent.py           # Agent memory checkpointing (rotation-safe discovery)
+├── route_memory_items_batch.py   # Batch routing + recency/confidence-aware re-entry
+├── process_auto_memory_items.py  # Finalize AUTO-routed items into storage
+├── backfill_rotated_transcripts.py  # One-time recovery for orphaned rotated sessions
 └── memory_db_schema.sql          # Database schema
 
 benchmarks/
@@ -261,6 +307,10 @@ control_panel/                    # Web dashboard (9 pages, live data)
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection |
 | `OPENCLAW_RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model |
 | `OPENCLAW_RERANK_CAP` | `20` | Max items to rerank |
+| `OPENCLAW_REJECT_WINDOW_DAYS` | `30` | How long a discard suppresses a matching re-extraction (`0` disables the gate) |
+| `OPENCLAW_REJECT_CONF_OVERRIDE_MARGIN` | `0.15` | Confidence margin that lets a stronger re-extracted claim back in despite a prior discard |
+| `OPENCLAW_HARD_DISCARD_BELOW_THRESHOLD` | _(unset)_ | Set to `1` to hard-discard below-threshold items instead of soft-holding them in the Inbox |
+| `OPENCLAW_ROTATED_LOOKBACK_DAYS` | `14` | How far back checkpoint discovery sweeps rotated `*.deleted.*` transcripts |
 
 ---
 
@@ -270,7 +320,7 @@ control_panel/                    # Web dashboard (9 pages, live data)
 python -m pytest scripts/ -q
 ```
 
-466 tests covering retrieval, lifecycle, feedback, summarization, temporal scoring, and knowledge graph operations.
+500+ tests covering retrieval, ingestion/checkpointing, routing & re-entry, lifecycle, feedback, summarization, temporal scoring, and knowledge graph operations.
 
 ---
 
