@@ -100,6 +100,8 @@ class BootPack:
     generated_at: str
     freshness: str
     timeline_day: str | None = None
+    cards_day: str | None = None
+    cards_stale: bool = False
     project_id: str | None = None
     sources: list[BootSource] = field(default_factory=list)
     timeline_text: str = ""
@@ -140,33 +142,51 @@ def build_boot_pack(agent: str, project_id: str | None = None) -> BootPack:
     cards_text = ""
     cards_clip = False
     cards_path: Path | None = None
+    cards_day: str | None = None
+    cards_stale = False
+    reference_day = timeline_day or cmp.today_utc()
     if cmp.layout_present():
-        # prefer the roll-up for the timeline day; else newest agent roll-up
-        day = timeline_day or cmp.today_utc()
-        candidate = cmp.daily_agent_card(agent, day, ensure=False)
-        if not candidate.exists():
+        # prefer the roll-up for the reference (timeline) day; else newest across days
+        candidate = cmp.daily_agent_card(agent, reference_day, ensure=False)
+        if candidate.exists():
+            cards_day = reference_day
+        else:
             # newest available daily roll-up for this agent across days
             base = cmp.canonical_root() / "daily"
-            found: list[Path] = []
             if base.is_dir():
                 for ddir in sorted(base.iterdir(), reverse=True):
                     c = ddir / f"{agent}.md"
                     if c.exists():
-                        found.append(c)
+                        candidate = c
+                        # the day is the parent dir name (YYYY-MM-DD)
+                        cards_day = ddir.name if re.fullmatch(
+                            r"[0-9]{4}-[0-9]{2}-[0-9]{2}", ddir.name) else None
                         break
-            candidate = found[0] if found else candidate
         cards_path = candidate
         cards_raw = _read(candidate)
         if cards_raw:
             cards_text, cards_clip = _tail_clip(cards_raw, MAX_CARDS_CHARS)
+            # Honesty: a card older than the reference day is STALE, not "Recent".
+            if cards_day and cards_day < reference_day:
+                cards_stale = True
+                degraded.append(
+                    f"session cards are stale: newest roll-up is {cards_day}, "
+                    f"but current activity is {reference_day}")
         else:
             degraded.append(f"no session-card roll-up for agent '{agent}'")
     else:
         degraded.append("canonical layout not scaffolded (no session cards available)")
+    cards_note = ""
+    if not cards_text:
+        cards_note = "no session-card roll-up"
+    elif cards_stale:
+        cards_note = f"STALE (from {cards_day}, older than {reference_day})"
     sources.append(BootSource(
         name="session_cards", path=str(cards_path) if cards_path else None,
-        ok=bool(cards_text), chars=len(cards_text), clipped=cards_clip,
-        note="" if cards_text else "no session-card roll-up",
+        # A stale card is NOT a healthy source: count it as not-ok so freshness
+        # and provenance reflect that the agent has no CURRENT activity record.
+        ok=bool(cards_text) and not cards_stale, chars=len(cards_text),
+        clipped=cards_clip, note=cards_note,
     ))
 
     # --- 3. Project context (optional) ---------------------------------------
@@ -199,20 +219,22 @@ def build_boot_pack(agent: str, project_id: str | None = None) -> BootPack:
         ))
 
     # --- Freshness verdict ---------------------------------------------------
-    # DEGRADED if we have NO timeline AND NO cards (agent would be flying blind).
-    # Otherwise fresh; we annotate partial gaps but don't cry wolf.
-    if not tl_text and not cards_text:
+    # DEGRADED if we have no CURRENT orientation source: no timeline AND no fresh
+    # cards (a stale card doesn't count as current — it would mislead). We still
+    # render the stale card content, but clearly marked and not as a freshness pass.
+    have_current_cards = bool(cards_text) and not cards_stale
+    if not tl_text and not have_current_cards:
         freshness = DEGRADED
         if not degraded:
-            degraded.append("no timeline and no session cards available")
+            degraded.append("no timeline and no current session cards available")
     else:
         freshness = FRESH
 
     return BootPack(
         agent=agent, generated_at=gen, freshness=freshness,
-        timeline_day=timeline_day, project_id=project_id,
-        sources=sources, timeline_text=tl_text, cards_text=cards_text,
-        project_text=project_text, degraded_reasons=degraded,
+        timeline_day=timeline_day, cards_day=cards_day, cards_stale=cards_stale,
+        project_id=project_id, sources=sources, timeline_text=tl_text,
+        cards_text=cards_text, project_text=project_text, degraded_reasons=degraded,
     )
 
 
@@ -226,6 +248,8 @@ def render_boot_pack(p: BootPack) -> str:
         f"generated_at: {p.generated_at}",
         f"freshness: {p.freshness}",
         f"timeline_day: {p.timeline_day or '?'}",
+        f"cards_day: {p.cards_day or '-'}",
+        f"cards_stale: {'true' if p.cards_stale else 'false'}",
         f"project_id: {p.project_id or '-'}",
         f"sources_ok: {sum(1 for s in p.sources if s.ok)}/{len(p.sources)}",
         "---",
@@ -259,8 +283,16 @@ def render_boot_pack(p: BootPack) -> str:
         body += ["_No system timeline available — this is a gap._", ""]
 
     # 2. cards
-    body.append("## 2. Your Recent Activity (session cards)")
+    if p.cards_stale:
+        body.append(f"## 2. Your Activity — ⚠️ STALE (from {p.cards_day}, not current)")
+    else:
+        body.append("## 2. Your Recent Activity (session cards)")
     if p.cards_text:
+        if p.cards_stale:
+            body.append(
+                f"> **⚠️ No session cards for the current period.** The roll-up below "
+                f"is from {p.cards_day} and may be out of date — do not treat it as "
+                f"the latest state; verify against the timeline / raw transcripts.")
         if any(s.name == "session_cards" and s.clipped for s in p.sources):
             body.append("_(showing most recent portion)_")
         body += ["", p.cards_text, ""]
@@ -280,7 +312,8 @@ def render_boot_pack(p: BootPack) -> str:
     for s in p.sources:
         flag = "ok" if s.ok else "MISSING"
         clip = " (clipped)" if s.clipped else ""
-        body.append(f"- {s.name}: {flag}{clip} — {s.path or '-'} ({s.chars} chars)")
+        note = f" [{s.note}]" if s.note else ""
+        body.append(f"- {s.name}: {flag}{clip}{note} — {s.path or '-'} ({s.chars} chars)")
     body.append("")
 
     return "\n".join(fm + body).rstrip() + "\n"

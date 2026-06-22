@@ -82,6 +82,52 @@ def test_partial_timeline_only_is_fresh_but_notes_gap(env):
     assert "No session-card roll-up" in rendered
 
 
+def test_stale_card_fallback_is_flagged_not_silent(env):
+    """Tester-found honesty gap: today's timeline + only an OLD card must NOT be
+    presented as 'Recent Activity' freshly. It must be loudly marked stale."""
+    g, cmp, root, tmp, tl = env
+    today = cmp.today_utc()
+    _write_timeline(tl, today, "- [09:00] ASSISTANT: working today")
+    # only an old roll-up exists (e.g. 3 weeks ago)
+    _write_agent_rollup(cmp, "builder", "2026-06-01",
+                        "# old roll-up\n## Session zzz\n- did old thing")
+    pack = g.build_boot_pack("builder")
+    assert pack.cards_stale is True
+    assert pack.cards_day == "2026-06-01"
+    rendered = g.render_boot_pack(pack)
+    assert "STALE" in rendered
+    assert "2026-06-01" in rendered
+    # the stale card source must not count as a healthy/current source
+    cards_src = next(s for s in pack.sources if s.name == "session_cards")
+    assert cards_src.ok is False
+    assert "STALE" in cards_src.note
+    # there IS a current timeline, so overall still fresh — but the gap is recorded
+    assert pack.freshness == g.FRESH
+    assert any("stale" in r.lower() for r in pack.degraded_reasons)
+
+
+def test_only_stale_card_no_timeline_is_degraded(env):
+    """If the ONLY source is a stale card (no timeline), the pack is degraded —
+    a stale card alone must not mask total lack of current orientation."""
+    g, cmp, root, tmp, tl = env
+    _write_agent_rollup(cmp, "builder", "2026-06-01", "# old\n- ancient")
+    pack = g.build_boot_pack("builder")
+    assert pack.cards_stale is True
+    assert pack.freshness == g.DEGRADED
+    assert "DEGRADED MEMORY" in g.render_boot_pack(pack)
+
+
+def test_current_day_card_not_marked_stale(env):
+    g, cmp, root, tmp, tl = env
+    today = cmp.today_utc()
+    _write_timeline(tl, today, "- x")
+    _write_agent_rollup(cmp, "builder", today, "# today\n- fresh work")
+    pack = g.build_boot_pack("builder")
+    assert pack.cards_stale is False
+    assert pack.cards_day == today
+    assert "STALE" not in g.render_boot_pack(pack)
+
+
 def test_falls_back_to_latest_md_when_no_daily(env):
     g, cmp, root, tmp, tl = env
     (tl / "latest.md").write_text("- fallback timeline content here", encoding="utf-8")

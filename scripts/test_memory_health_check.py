@@ -218,3 +218,67 @@ def test_buggy_check_does_not_crash(monkeypatch, fake_env):
     monkeypatch.setattr(mh, "CORE_CHECKS", [boom])
     report = mh.run_checks(_cfg(), include_future=False)
     assert report.overall == mh.FAIL  # captured, not raised
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: boot_packs_generated content-staleness (tester-found gap)
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def canon_env(tmp_path, monkeypatch):
+    root = tmp_path / "canonical"
+    monkeypatch.setenv("OPENCLAW_CANONICAL_MEMORY_ROOT", str(root))
+    import canonical_memory_paths as cmp
+
+    importlib.reload(cmp)
+    importlib.reload(mh)  # rebind cmp inside the check
+    cmp.scaffold()
+    return cmp, root
+
+
+def _make_active_agent(cmp, agent, day):
+    # an agent is "active today" if it has a daily roll-up for today
+    p = cmp.daily_agent_card(agent, day)
+    p.write_text(f"# roll-up {agent} {day}\n- did stuff", encoding="utf-8")
+
+
+def test_boot_pack_check_ok_when_fresh(canon_env):
+    cmp, root = canon_env
+    today = cmp.today_utc()
+    _make_active_agent(cmp, "builder", today)
+    bp = cmp.session_dir("builder") / "_BOOT_PACK.md"
+    bp.write_text(
+        f"---\nagent: builder\ngenerated_at: {mh_now()}\nfreshness: fresh\n"
+        f"cards_day: {today}\ncards_stale: false\n---\n# Boot Pack\n",
+        encoding="utf-8")
+    chk = mh.check_boot_packs_generated(_cfg())
+    assert chk.status == mh.OK, chk.detail
+
+
+def test_boot_pack_check_warns_on_content_stale(canon_env):
+    cmp, root = canon_env
+    today = cmp.today_utc()
+    _make_active_agent(cmp, "builder", today)
+    bp = cmp.session_dir("builder") / "_BOOT_PACK.md"
+    # FRESH timestamp but STALE cards (the exact masking case the tester found)
+    bp.write_text(
+        f"---\nagent: builder\ngenerated_at: {mh_now()}\nfreshness: fresh\n"
+        f"cards_day: 2026-06-01\ncards_stale: true\n---\n# Boot Pack\n",
+        encoding="utf-8")
+    chk = mh.check_boot_packs_generated(_cfg())
+    assert chk.status == mh.WARN
+    assert "content-stale" in chk.detail
+
+
+def test_boot_pack_check_warns_on_missing(canon_env):
+    cmp, root = canon_env
+    today = cmp.today_utc()
+    _make_active_agent(cmp, "builder", today)
+    # no boot pack written
+    chk = mh.check_boot_packs_generated(_cfg())
+    assert chk.status == mh.WARN
+    assert "missing" in chk.detail
+
+
+def mh_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

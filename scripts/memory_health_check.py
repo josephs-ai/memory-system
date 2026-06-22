@@ -469,38 +469,61 @@ def check_boot_packs_generated(cfg: dict) -> Check:
         if not active_agents:
             return Check("boot_packs_generated", SKIP, "no active agents today", 0, str(ddir))
 
+        def _frontmatter(text: str) -> dict:
+            """Parse the leading --- ... --- YAML-ish frontmatter block fully
+            (not a fixed-size head window, which is brittle as frontmatter grows)."""
+            fm: dict[str, str] = {}
+            lines = text.splitlines()
+            if not lines or lines[0].strip() != "---":
+                return fm
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    fm[k.strip()] = v.strip()
+            return fm
+
         now = datetime.now(timezone.utc)
-        missing, stale, degraded, ok = [], [], [], 0
+        today = cmp.today_utc()
+        missing, stale, degraded, content_stale, ok = [], [], [], [], 0
         for agent in active_agents:
             bp = cmp.session_dir(agent) / "_BOOT_PACK.md"
             if not bp.exists():
                 missing.append(agent)
                 continue
-            head = bp.read_text(encoding="utf-8", errors="ignore")[:600]
-            if "freshness: degraded" in head:
+            fm = _frontmatter(bp.read_text(encoding="utf-8", errors="ignore"))
+            if fm.get("freshness") == "degraded":
                 degraded.append(agent)
                 continue
-            m = re.search(r"generated_at:\s*([0-9T:\-]+Z)", head)
+            # content-staleness: generator stamps cards_stale / cards_day
+            if fm.get("cards_stale") == "true" or (
+                fm.get("cards_day") not in (None, "-", "?") and fm.get("cards_day", "") < today
+            ):
+                content_stale.append(agent)
+                continue
+            gen_at = fm.get("generated_at", "")
             fresh = False
-            if m:
-                try:
-                    gen = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
-                    fresh = (now - gen).total_seconds() < 24 * 3600
-                except ValueError:
-                    fresh = False
+            try:
+                gen = datetime.fromisoformat(gen_at.replace("Z", "+00:00"))
+                fresh = (now - gen).total_seconds() < 24 * 3600
+            except ValueError:
+                fresh = False
             if fresh:
                 ok += 1
             else:
                 stale.append(agent)
 
-        if missing or degraded or stale:
+        if missing or degraded or stale or content_stale:
             parts = []
             if missing:
                 parts.append(f"missing={missing}")
             if degraded:
                 parts.append(f"degraded={degraded}")
+            if content_stale:
+                parts.append(f"content-stale={content_stale}")
             if stale:
-                parts.append(f"stale={stale}")
+                parts.append(f"stale-timestamp={stale}")
             return Check("boot_packs_generated", WARN,
                          f"{ok}/{len(active_agents)} fresh; " + ", ".join(parts),
                          ok, str(cmp.canonical_root()))
