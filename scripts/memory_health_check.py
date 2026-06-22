@@ -417,6 +417,36 @@ def check_canonical_layout_present(cfg: dict) -> Check:
         return Check("canonical_layout_present", WARN, f"canonical paths unavailable: {e}", None, "")
 
 
+def check_daily_cards_fresh(cfg: dict) -> Check:
+    """Phase 2: today's per-agent daily session cards exist and are fresh. WARN if
+    the canonical layout is present but today has no fresh cards (auto_memory not
+    running); SKIP if the canonical layout isn't scaffolded at all (Phase 1 owns
+    that signal)."""
+    try:
+        import canonical_memory_paths as cmp  # local import
+
+        if not cmp.layout_present():
+            return Check("daily_cards_fresh", SKIP, "canonical layout not scaffolded", None, "")
+        day = cmp.today_utc()
+        ddir = cmp.daily_dir(day, ensure=False)
+        if not ddir.exists():
+            return Check("daily_cards_fresh", WARN, f"no daily dir for {day} (auto_memory idle)", 0, str(ddir))
+        cards = [p for p in ddir.glob("*.md") if p.name != "_index.md"]
+        fresh = 0
+        for c in cards:
+            try:
+                head = c.read_text(encoding="utf-8", errors="ignore")[:400].lower()
+                if "freshness: fresh" in head or "_generated" in head:
+                    fresh += 1
+            except OSError:
+                continue
+        if cards:
+            return Check("daily_cards_fresh", OK, f"{len(cards)} agent card(s) for {day}", len(cards), str(ddir))
+        return Check("daily_cards_fresh", WARN, f"daily dir for {day} empty", 0, str(ddir))
+    except Exception as e:  # noqa: BLE001
+        return Check("daily_cards_fresh", WARN, f"daily-card check unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -457,11 +487,11 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_search_service_healthy,
     check_embeddings_provider_healthy,
     check_canonical_layout_present,
+    check_daily_cards_fresh,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
     _placeholder("boot_packs_generated", "Phase 3"),
-    _placeholder("daily_cards_fresh", "Phase 2"),
     _placeholder("digest_fresh", "Phase 4"),
     _placeholder("auto_dream_last_run", "Phase 4"),
 ]
