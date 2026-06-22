@@ -21,6 +21,7 @@ This tool must be safe to run anytime and must never mutate memory state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -56,6 +57,7 @@ HEALTH_DIR = MEMORY_ROOT / "health"
 STATE_DIR = MEMORY_ROOT / "state"
 CURSORS_DIR = STATE_DIR / "cursors"
 HEALTH_OUT = HEALTH_DIR / "memory_startup_latest.json"
+CHECKPOINT_ALL_STATE = MEMORY_ROOT / "logs" / "checkpoint_all_agents_state.json"
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
 _SEVERITY = {SKIP: -1, OK: 0, WARN: 1, FAIL: 2}
@@ -340,25 +342,77 @@ def check_checkpoint_cursors_advancing(cfg: dict) -> Check:
     return Check("checkpoint_cursors_advancing", OK, f"{len(candidates)} cursors, fresh", val, str(STATE_DIR))
 
 
+def _checkpoint_state_key(agent_name: str, path: Path) -> str:
+    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
+    return f"{agent_name}:{path.name}:{digest}"
+
+
+def _checkpoint_signature(path: Path) -> dict[str, Any] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return {
+        "session_file": str(path),
+        "mtime_ms": int(st.st_mtime * 1000),
+        "size": int(st.st_size),
+    }
+
+
+def _checkpoint_state_matches(agent_name: str, path: Path, state: dict[str, Any]) -> bool:
+    sig = _checkpoint_signature(path)
+    if not sig:
+        return False
+    prev = state.get(_checkpoint_state_key(agent_name, path)) or {}
+    return (
+        prev.get("session_file") == sig["session_file"]
+        and prev.get("mtime_ms") == sig["mtime_ms"]
+        and prev.get("size") == sig["size"]
+    )
+
+
 def check_rotated_transcripts_visible(cfg: dict) -> Check:
-    """Count recent rotated/reset transcripts. Informational warn on large backlog."""
+    """Count recent rotated/reset transcripts and warn only on unprocessed ones.
+
+    Merely having many rotated files is normal in this deployment and previously
+    caused permanent WARN noise. The actual startup-risk signal is rotated files
+    whose checkpoint_all_agents state does not match the current file signature.
+    """
     cutoff = _now() - 7 * 86400
+    try:
+        state = json.loads(CHECKPOINT_ALL_STATE.read_text(encoding="utf-8")) if CHECKPOINT_ALL_STATE.exists() else {}
+    except Exception:
+        state = {}
+
     rotated = 0
+    pending: list[str] = []
     for agent_dir in _active_agent_dirs():
+        agent_name = agent_dir.name
         sdir = agent_dir / "sessions"
         for pattern in ("*.jsonl.reset.*", "*.jsonl.deleted.*"):
             for p in sdir.glob(pattern):
-                if _mtime(p) >= cutoff:
-                    rotated += 1
-    if rotated > cfg["rotated_backlog_warn"]:
+                if _mtime(p) < cutoff:
+                    continue
+                rotated += 1
+                if not _checkpoint_state_matches(agent_name, p, state):
+                    pending.append(f"{agent_name}/{p.name}")
+
+    val = {"visible_7d": rotated, "pending_rotated": len(pending), "pending_sample": pending[:10]}
+    if pending:
         return Check(
             "rotated_transcripts_visible",
             WARN,
-            f"{rotated} rotated transcripts in last 7d (ensure checkpoint recovery ran)",
-            rotated,
-            "agents/*/sessions",
+            f"{len(pending)} uncheckpointed rotated transcript(s) out of {rotated} visible in last 7d",
+            val,
+            str(CHECKPOINT_ALL_STATE),
         )
-    return Check("rotated_transcripts_visible", OK, f"{rotated} rotated (last 7d)", rotated, "agents/*/sessions")
+    return Check(
+        "rotated_transcripts_visible",
+        OK,
+        f"{rotated} rotated visible in last 7d; all checkpoint state current",
+        val,
+        str(CHECKPOINT_ALL_STATE),
+    )
 
 
 def check_pending_transcript_backlog(cfg: dict) -> Check:
@@ -676,6 +730,39 @@ def check_card_search_ready(cfg: dict) -> Check:
         return Check("card_search_ready", WARN, f"card search check unavailable: {e}", None, "")
 
 
+def check_dashboard_fresh(cfg: dict) -> Check:
+    """Phase 6: the memory control-panel dashboard has been regenerated recently.
+    OK if memory_dashboard.md exists and was generated within 24h; WARN if
+    missing/stale; SKIP if the canonical layout isn't scaffolded."""
+    import re
+    from datetime import datetime, timezone
+
+    try:
+        import canonical_memory_paths as cmp
+
+        if not cmp.layout_present():
+            return Check("dashboard_fresh", SKIP, "canonical layout not scaffolded", None, "")
+        md = cmp.metadata_dir("catalogs", ensure=False) / "memory_dashboard.md"
+        if not md.is_file():
+            return Check("dashboard_fresh", WARN,
+                         "dashboard missing (run generate_memory_dashboard.py)", 0, str(md))
+        head = md.read_text(encoding="utf-8", errors="ignore")[:400]
+        m = re.search(r"dashboard generated ([0-9T:\-]+Z)", head)
+        if not m:
+            return Check("dashboard_fresh", WARN, "dashboard present but no timestamp", None, str(md))
+        try:
+            g = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - g).total_seconds()
+        except ValueError:
+            return Check("dashboard_fresh", WARN, "dashboard timestamp unparseable", None, str(md))
+        if age > 24 * 3600:
+            return Check("dashboard_fresh", WARN,
+                         f"dashboard stale (generated {m.group(1)})", None, str(md))
+        return Check("dashboard_fresh", OK, f"dashboard fresh (generated {m.group(1)})", None, str(md))
+    except Exception as e:  # noqa: BLE001
+        return Check("dashboard_fresh", WARN, f"dashboard check unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -721,6 +808,7 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_boot_packs_generated,
     check_digest_fresh,
     check_card_search_ready,
+    check_dashboard_fresh,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
