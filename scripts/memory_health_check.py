@@ -534,6 +534,50 @@ def check_boot_packs_generated(cfg: dict) -> Check:
         return Check("boot_packs_generated", WARN, f"boot-pack check unavailable: {e}", None, "")
 
 
+def check_digest_fresh(cfg: dict) -> Check:
+    """Phase 4: the auto_dream digest layer has at least one recent node. OK if a
+    digest node was generated within N days; WARN if the digest tree is empty or
+    all nodes are stale; SKIP if the canonical layout isn't scaffolded."""
+    import re
+    from datetime import datetime, timezone
+
+    try:
+        import canonical_memory_paths as cmp
+
+        if not cmp.layout_present():
+            return Check("digest_fresh", SKIP, "canonical layout not scaffolded", None, "")
+
+        now = datetime.now(timezone.utc)
+        total, fresh = 0, 0
+        newest: str | None = None
+        for kind in cmp.DIGEST_KINDS:
+            d = cmp.digest_dir(kind, ensure=False)
+            if not d.is_dir():
+                continue
+            for f in d.glob("*.md"):
+                total += 1
+                head = f.read_text(encoding="utf-8", errors="ignore")[:400]
+                m = re.search(r"generated_at:\s*([0-9T:\-]+Z)", head)
+                if m:
+                    if newest is None or m.group(1) > newest:
+                        newest = m.group(1)
+                    try:
+                        gen = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+                        if (now - gen).total_seconds() < 14 * 24 * 3600:
+                            fresh += 1
+                    except ValueError:
+                        pass
+        if total == 0:
+            return Check("digest_fresh", WARN, "no digest nodes yet (auto_dream not run)", 0, "")
+        if fresh == 0:
+            return Check("digest_fresh", WARN,
+                         f"{total} digest node(s) but none fresh (newest {newest})", 0, "")
+        return Check("digest_fresh", OK,
+                     f"{fresh}/{total} digest node(s) fresh (newest {newest})", fresh, "")
+    except Exception as e:  # noqa: BLE001
+        return Check("digest_fresh", WARN, f"digest check unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -576,11 +620,11 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_canonical_layout_present,
     check_daily_cards_fresh,
     check_boot_packs_generated,
+    check_digest_fresh,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
-    _placeholder("digest_fresh", "Phase 4"),
-    _placeholder("auto_dream_last_run", "Phase 4"),
+    _placeholder("hybrid_search_ready", "Phase 5"),
 ]
 
 
