@@ -52,15 +52,54 @@ def fake_env(tmp_path, monkeypatch):
     sess.mkdir(parents=True, exist_ok=True)
     (sess / "abc.jsonl").write_text("{}\n", encoding="utf-8")
 
+    # Startup contract files: a healthy system has AGENTS/MEMORY/BOOT in main
+    # and agent workspaces, so agents are not told to read missing memory.
+    continuity_boot = (
+        "# BOOT.md - Continuity Boot\n"
+        "Read MEMORY.md and .memory-index/timeline/latest.md before recency answers.\n"
+        "Do **not** say there is no memory yet unless memory is unavailable.\n"
+    )
+    (ws / "AGENTS.md").write_text("Read MEMORY.md and timeline.\n", encoding="utf-8")
+    (ws / "MEMORY.md").write_text("durable memory\n", encoding="utf-8")
+    (ws / "BOOT.md").write_text(continuity_boot, encoding="utf-8")
+
     # A clean agent workspace whose timeline is a proper symlink
-    aws = tmp_path / ".openclaw" / "workspace-builder" / ".memory-index"
+    builder_ws = tmp_path / ".openclaw" / "workspace-builder"
+    aws = builder_ws / ".memory-index"
     aws.mkdir(parents=True, exist_ok=True)
     (aws / "timeline").symlink_to(timeline, target_is_directory=True)
-    (tmp_path / ".openclaw" / "workspace-builder" / "AGENTS.md").write_text(
+    (builder_ws / "AGENTS.md").write_text(
         'This workspace is not fresh. Do **not** follow any older '
         '"There is no memory yet" bootstrap text.\n',
         encoding="utf-8",
     )
+    (builder_ws / "MEMORY.md").write_text("durable memory\n", encoding="utf-8")
+    (builder_ws / "BOOT.md").write_text(continuity_boot, encoding="utf-8")
+
+    # Hermetic canonical root: the Phase 1/2/3/4 checks (canonical_layout_present,
+    # daily_cards_fresh, boot_packs_generated, digest_fresh) resolve the canonical
+    # tree via canonical_memory_paths.canonical_root(), which honors
+    # OPENCLAW_CANONICAL_MEMORY_ROOT. Without this they'd read the REAL workspace
+    # tree and make the test non-hermetic (transient flake). Scaffold a healthy
+    # canonical layout in tmp so "clean system" is genuinely clean.
+    canon = mi / "canonical"
+    monkeypatch.setenv("OPENCLAW_CANONICAL_MEMORY_ROOT", str(canon))
+    import canonical_memory_paths as _cmp
+
+    importlib.reload(_cmp)
+    importlib.reload(mh)  # rebind cmp references inside the checks
+    _cmp.scaffold()
+    # a fresh daily card + boot pack + digest node so the clean-system checks pass
+    _now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _cmp.daily_agent_card("main", today).write_text(
+        f"# roll-up main {today}\n- did stuff\n", encoding="utf-8")
+    (_cmp.session_dir("main") / "_BOOT_PACK.md").write_text(
+        f"---\nagent: main\ngenerated_at: {_now}\nfreshness: fresh\n"
+        f"cards_day: {today}\ncards_stale: false\n---\n# Boot Pack\n", encoding="utf-8")
+    _cmp.digest_node("decisions", "decisions").write_text(
+        f"---\nkind: decisions\nslug: decisions\ngenerated_at: {_now}\n"
+        f"freshness: fresh\n---\n# Decisions\n## Current understanding\n- a decision\n",
+        encoding="utf-8")
 
     # Re-point module constants
     monkeypatch.setattr(mh, "OPENCLAW_ROOT", root)
@@ -168,6 +207,13 @@ def test_corrective_negation_text_is_clean(fake_env):
     )
     c = mh.check_boot_text_clean(_cfg())
     assert c.status == mh.OK
+
+
+def test_missing_workspace_memory_file_fails(fake_env):
+    (mh.WORKSPACE.parent / "workspace-builder" / "MEMORY.md").unlink()
+    c = mh.check_startup_contract_files_present(_cfg())
+    assert c.status == mh.FAIL
+    assert "workspace-builder/MEMORY.md" in str(c.value)
 
 
 # ---------------------------------------------------------------------------

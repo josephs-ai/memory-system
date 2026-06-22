@@ -153,6 +153,15 @@ def test_provenance_sections_do_not_pollute_digests(env):
             assert ".. 2026-06-20T09:00Z" not in understanding
 
 
+def test_ignored_section_variants(env):
+    """Defense-in-depth: Provenance heading variants must also be ignored."""
+    d, cmp, root = env
+    for variant in ("Provenance", "Provenance:", "Provenance notes", "## PROVENANCE"):
+        assert d._is_ignored_section(variant) is True, variant
+    for live in ("Decisions", "Blockers", "Summary"):
+        assert d._is_ignored_section(live) is False, live
+
+
 def test_frontmatter_and_freshness(env):
     d, cmp, root = env
     _rollup(cmp, "builder", "2026-06-20", _DAY1)

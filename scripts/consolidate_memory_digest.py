@@ -120,8 +120,13 @@ def _iter_card_sections(text: str):
 
 
 def _is_ignored_section(title: str) -> bool:
-    key = title.strip().lower().lstrip("# ").strip()
+    key = title.strip().lower().lstrip("# ").strip().rstrip(":").strip()
     if key in _IGNORE_SECTIONS:
+        return True
+    # defense-in-depth: catch "Provenance notes", "Provenance:" etc. The card
+    # renderer only emits bare "Provenance" today, but a future/variant heading
+    # must never leak transcript paths / event counts into knowledge bullets.
+    if key.startswith("provenance"):
         return True
     return any(key.startswith(p) for p in _IGNORE_SECTION_PREFIXES)
 
