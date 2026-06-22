@@ -7,6 +7,14 @@ complete, eliminating the 'couldn't stop thread pool-1-worker-X' warnings.
 import pytest
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "integration: live end-to-end test that touches the real canonical tree / "
+        "DB; deselect with -m 'not integration' in the default hermetic run.",
+    )
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _cleanup_pools():
     """Yield control to the test session, then close all DB pools on teardown."""
