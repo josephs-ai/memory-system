@@ -142,9 +142,12 @@ def _stage_from_files(name: str, files: list[Path]) -> StageState:
     for f in files:
         gen = _read_frontmatter_value(f, "generated_at") or ""
         if not gen:
-            # daily roll-ups carry "_Generated <ts>_" in body, not frontmatter
+            # daily roll-ups carry "_Generated <ts>_" in body, not frontmatter.
+            # Anchor the timestamp pattern precisely so trailing prose (e.g.
+            # "Z. 1 agent(s)") isn't greedily captured into the displayed stamp.
             try:
-                m = re.search(r"_Generated\s+([0-9T:\-Z\.]+)", f.read_text(encoding="utf-8", errors="ignore")[:200])
+                m = re.search(r"_Generated\s+(\d{4}-\d{2}-\d{2}T[\d:]+(?:\.\d+)?Z?)",
+                              f.read_text(encoding="utf-8", errors="ignore")[:200])
                 gen = m.group(1) if m else ""
             except OSError:
                 gen = ""
@@ -273,9 +276,14 @@ def render_markdown(data: dict) -> str:
     lines.append("# 🧠 Memory Control Panel")
     lines.append("")
     glyph = _GLYPH.get(overall, "❔")
+    # normalize the health timestamp (live runs carry microseconds; cached is clean)
+    health_at = h.get("generated_at", "") or "?"
+    hm = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", health_at)
+    if hm:
+        health_at = hm.group(1) + "Z"
     lines.append(f"**Overall health: {glyph} {overall.upper()}**  ·  "
                  f"dashboard generated {data['generated_at']}  ·  "
-                 f"health as of {h.get('generated_at', '?')}")
+                 f"health as of {health_at}")
     for n in data.get("notes", []):
         lines.append(f"> ⚠️ {n}")
     lines.append("")
