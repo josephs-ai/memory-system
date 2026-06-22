@@ -92,6 +92,13 @@ def test_invalid_day_raises(cmp_mod):
         cmp.daily_dir("2026/06/22", ensure=False)
 
 
+def test_unicode_fullwidth_day_rejected(cmp_mod):
+    # \d would have accepted fullwidth digits, creating a non-ASCII dir name.
+    cmp, _ = cmp_mod
+    with pytest.raises(ValueError):
+        cmp.daily_dir("２０２６-０６-２２", ensure=False)
+
+
 def test_empty_agent_raises(cmp_mod):
     cmp, _ = cmp_mod
     with pytest.raises(ValueError):

@@ -68,8 +68,11 @@ def today_utc() -> str:
 
 def _valid_day(day: str | None) -> str:
     day = day or today_utc()
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
-        raise ValueError(f"day must be YYYY-MM-DD, got {day!r}")
+    # Use an explicit ASCII class (not \d, which also matches Unicode/fullwidth
+    # digits and would yield non-ASCII directory names once Phase 2 ingests day
+    # values derived from transcript timestamps).
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+        raise ValueError(f"day must be ASCII YYYY-MM-DD, got {day!r}")
     return day
 
 
