@@ -270,6 +270,54 @@ def check_boot_text_clean(cfg: dict) -> Check:
     return Check("boot_text_clean", OK, "no stale bootstrap markers", 0, "")
 
 
+
+
+def check_startup_contract_files_present(cfg: dict) -> Check:
+    """Ensure startup files referenced by the boot contract actually exist.
+
+    A major wake-up-clueless failure mode was agents being told to read
+    MEMORY.md/AGENTS.md while their workspace lacked those files. This check
+    only validates the local readable startup surface; it does not require each
+    agent to have unique memory content (symlinks to main MEMORY.md are valid).
+    """
+    bad: list[str] = []
+    roots = [WORKSPACE] + _agent_workspaces()
+    for root in roots:
+        agents = root / "AGENTS.md"
+        memory = root / "MEMORY.md"
+        if not agents.exists() or (agents.is_file() and agents.stat().st_size == 0):
+            bad.append(f"{root.name}/AGENTS.md")
+        if not memory.exists() or (memory.is_file() and memory.stat().st_size == 0):
+            bad.append(f"{root.name}/MEMORY.md")
+
+    # BOOT.md is a continuity helper, but AGENTS.md is the injected contract in
+    # many OpenClaw surfaces. Treat missing BOOT as warn, not fail, unless the
+    # workspace has no AGENTS either (already captured above).
+    missing_boot = [root.name for root in roots if not (root / "BOOT.md").exists()]
+    if bad:
+        return Check(
+            "startup_contract_files_present",
+            FAIL,
+            f"missing/empty startup files: {', '.join(bad[:8])}",
+            {"missing_required": bad, "missing_boot": missing_boot},
+            "workspace*/{AGENTS.md,MEMORY.md,BOOT.md}",
+        )
+    if missing_boot:
+        return Check(
+            "startup_contract_files_present",
+            WARN,
+            f"{len(missing_boot)} workspace(s) missing BOOT.md continuity helper",
+            {"missing_boot": missing_boot},
+            "workspace*/BOOT.md",
+        )
+    return Check(
+        "startup_contract_files_present",
+        OK,
+        f"{len(roots)} workspace(s) have AGENTS/MEMORY/BOOT",
+        len(roots),
+        "workspace*",
+    )
+
 def check_checkpoint_cursors_advancing(cfg: dict) -> Check:
     candidates: list[Path] = []
     if CURSORS_DIR.exists():
@@ -578,6 +626,56 @@ def check_digest_fresh(cfg: dict) -> Check:
         return Check("digest_fresh", WARN, f"digest check unavailable: {e}", None, "")
 
 
+def check_card_search_ready(cfg: dict) -> Check:
+    """Phase 5: the readable-card search index exists and is fresh. OK if
+    card_index.jsonl is present and was rebuilt within 14d AND has records; WARN if
+    missing/empty/stale; SKIP if the canonical layout isn't scaffolded.
+
+    This is the search path that works even when the embedding/vector service is
+    down, so its health is tracked independently of search_service_healthy."""
+    import re
+    from datetime import datetime, timezone
+
+    try:
+        import canonical_memory_paths as cmp
+
+        if not cmp.layout_present():
+            return Check("card_search_ready", SKIP, "canonical layout not scaffolded", None, "")
+
+        idx = cmp.metadata_dir("indexes", ensure=False) / "card_index.jsonl"
+        if not idx.is_file():
+            return Check("card_search_ready", WARN,
+                         "card index missing (run card_search_index.py)", 0, str(idx))
+        head = idx.read_text(encoding="utf-8", errors="ignore").splitlines()
+        meta = {}
+        for line in head[:1]:
+            try:
+                obj = json.loads(line)
+                meta = obj.get("_index_meta", {})
+            except Exception:  # noqa: BLE001
+                pass
+        records = meta.get("records", max(0, len(head) - 1))
+        if records == 0:
+            return Check("card_search_ready", WARN, "card index empty (0 records)", 0, str(idx))
+        gen = meta.get("generated_at", "")
+        fresh = True
+        if gen:
+            m = re.search(r"([0-9T:\-]+Z)", gen)
+            if m:
+                try:
+                    g = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+                    fresh = (datetime.now(timezone.utc) - g).total_seconds() < 14 * 24 * 3600
+                except ValueError:
+                    pass
+        if not fresh:
+            return Check("card_search_ready", WARN,
+                         f"card index stale (generated {gen}, {records} records)", records, str(idx))
+        return Check("card_search_ready", OK,
+                     f"card index fresh ({records} records, generated {gen})", records, str(idx))
+    except Exception as e:  # noqa: BLE001
+        return Check("card_search_ready", WARN, f"card search check unavailable: {e}", None, "")
+
+
 def check_embeddings_provider_healthy(cfg: dict) -> Check:
     """Light, non-fatal: surface the configured provider. Embedding outages have
     happened 3x; we want them visible but they shouldn't hard-fail startup since
@@ -609,6 +707,7 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_timeline_today_exists,
     check_workspaces_timeline_linked,
     check_boot_text_clean,
+    check_startup_contract_files_present,
     check_checkpoint_cursors_advancing,
     check_rotated_transcripts_visible,
     check_pending_transcript_backlog,
@@ -621,10 +720,10 @@ CORE_CHECKS: list[Callable[[dict], Check]] = [
     check_daily_cards_fresh,
     check_boot_packs_generated,
     check_digest_fresh,
+    check_card_search_ready,
 ]
 
 FUTURE_CHECKS: list[Callable[[dict], Check]] = [
-    _placeholder("hybrid_search_ready", "Phase 5"),
 ]
 
 
