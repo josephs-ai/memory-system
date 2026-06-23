@@ -34,6 +34,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from memory_db import (
     upsert_memory_items,
     upsert_memory_embedding,
+    upsert_memory_embeddings_batch,
     hybrid_search_memory_items,
     POOL,
 )
@@ -44,9 +45,374 @@ LOGGER = logging.getLogger("openclaw.benchmarks.common")
 BENCHMARKS_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BENCHMARKS_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+TRACE_DIR = RESULTS_DIR / "traces"
+TRACE_DIR.mkdir(exist_ok=True)
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _embed_model = None
+
+
+# ---------------------------------------------------------------------------
+# Benchmark QA tracing / failure attribution
+# ---------------------------------------------------------------------------
+# This layer is intentionally benchmark-agnostic.  It records enough evidence to
+# distinguish retrieval misses from extraction/rerank/reader/formatting misses
+# without baking in LoCoMo/LongMemEval-specific labels or answer hacks.
+
+_QUERY_INTENT_PATTERNS: list[tuple[str, str]] = [
+    ("aggregation_count", r"\b(how many|how much|total|combined|in total|altogether|count)\b"),
+    ("temporal_when", r"\bwhen\s+(?:did|was|were|is|are|do|does|has|have)\b"),
+    ("temporal_latest", r"\b(latest|most recent|current|currently|now|newest|last updated)\b"),
+    ("temporal_earliest", r"\b(first|earliest|oldest|original|initial)\b"),
+    ("temporal_range", r"\b(when|before|after|during|between|date|time|year|month|day)\b"),
+    ("preference", r"\b(prefer|preference|favorite|favourite|like|dislike|hate|love)\b"),
+    ("contradiction_or_update", r"\b(actually|instead|correction|corrected|wrong|changed|updated|superseded)\b"),
+    ("multi_hop", r"\b(why|how did|because|relation|related|connection|compare)\b"),
+    ("direct_fact", r"\b(who|what|where|which|whose)\b"),
+]
+
+
+def classify_query_intent(question: str) -> str:
+    """Return a coarse, general-purpose query intent for routing/trace analysis."""
+    q = (question or "").strip().lower()
+    for intent, pattern in _QUERY_INTENT_PATTERNS:
+        if re.search(pattern, q):
+            return intent
+    return "open_ended_summary" if len(q.split()) > 10 else "unknown"
+
+
+def _answer_token_overlap(text: str, answer: str) -> float:
+    """Recall-like token overlap: how much of answer appears in text."""
+    answer_tokens = set(normalize_answer(answer).split())
+    if not answer_tokens:
+        return 0.0
+    text_tokens = set(normalize_answer(text).split())
+    return len(answer_tokens & text_tokens) / len(answer_tokens)
+
+
+def evidence_contains_answer(
+    retrieved_items: list[dict],
+    gold_answer: str,
+    *,
+    min_overlap: float = 0.6,
+) -> bool:
+    """Heuristic evidence-hit check for benchmark traces.
+
+    This is not scoring logic; it is diagnostic instrumentation.  It answers:
+    did the retrieved evidence probably contain the gold answer somewhere?
+    """
+    if not gold_answer or not retrieved_items:
+        return False
+    gold_norm = normalize_answer(gold_answer)
+    for item in retrieved_items:
+        text = " ".join(
+            str(item.get(k) or "")
+            for k in ("value", "text", "entity", "property")
+        )
+        text_norm = normalize_answer(text)
+        if gold_norm and gold_norm in text_norm:
+            return True
+        if _answer_token_overlap(text, gold_answer) >= min_overlap:
+            return True
+    return False
+
+
+def classify_failure_bucket(
+    *,
+    predicted_answer: str,
+    gold_answer: str,
+    retrieved_items: list[dict],
+    reader_used: bool,
+    f1: float | None = None,
+    exact_match_score: float | None = None,
+) -> str:
+    """Classify benchmark QA outcome into a general failure/success bucket."""
+    if exact_match_score is None:
+        exact_match_score = exact_match(predicted_answer, gold_answer)
+    if f1 is None:
+        f1 = token_f1(predicted_answer, gold_answer)
+
+    if exact_match_score >= 1.0:
+        return "success_exact"
+    if f1 >= 0.8:
+        return "success_partial"
+
+    evidence_hit = evidence_contains_answer(retrieved_items, gold_answer)
+    if not retrieved_items:
+        return "retrieval_empty"
+    if not evidence_hit:
+        return "retrieval_miss"
+    if reader_used:
+        return "reader_miss"
+
+    pred_len = len(normalize_answer(predicted_answer).split())
+    gold_len = len(normalize_answer(gold_answer).split())
+    if gold_len and pred_len > max(gold_len * 3, gold_len + 8):
+        return "formatting_too_verbose"
+    return "extraction_or_formatting_miss"
+
+
+def summarize_retrieved_items(retrieved_items: list[dict], *, max_items: int = 10) -> list[dict]:
+    """Compact retrieved evidence for trace JSONL without dumping giant context."""
+    summary: list[dict] = []
+    for rank, item in enumerate(retrieved_items[:max_items], start=1):
+        text = str(item.get("text") or item.get("value") or "")
+        summary.append({
+            "rank": rank,
+            "id": item.get("id") or item.get("item_id"),
+            "score": item.get("score"),
+            "rerank_score": item.get("rerank_score"),
+            "source_type": item.get("source_type"),
+            "memory_type": item.get("memory_type"),
+            "entity": item.get("entity"),
+            "property": item.get("property"),
+            "status": item.get("status"),
+            "source_agent": item.get("source_agent"),
+            "source_session": item.get("source_session"),
+            "text_preview": text[:240],
+        })
+    return summary
+
+
+class BenchmarkTraceWriter:
+    """Append-only JSONL trace writer for benchmark QA diagnostics."""
+
+    def __init__(self, benchmark_name: str, run_label: str | None = None):
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", benchmark_name).strip("_") or "benchmark"
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_label or ts).strip("_")
+        self.path = TRACE_DIR / f"{safe_name}_{safe_label}_{ts}.jsonl"
+        self.counts: dict[str, int] = {}
+        self.count = 0
+
+    def record(
+        self,
+        *,
+        question_id: str | None,
+        question: str,
+        gold_answer: str,
+        predicted_answer: str,
+        retrieved_items: list[dict],
+        f1: float,
+        exact_match_score: float,
+        latency: float,
+        reader_used: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict:
+        intent = classify_query_intent(question)
+        evidence_hit = evidence_contains_answer(retrieved_items, gold_answer)
+        bucket = classify_failure_bucket(
+            predicted_answer=predicted_answer,
+            gold_answer=gold_answer,
+            retrieved_items=retrieved_items,
+            reader_used=reader_used,
+            f1=f1,
+            exact_match_score=exact_match_score,
+        )
+        row = {
+            "benchmark": self.path.name.split("_", 1)[0],
+            "question_id": question_id,
+            "question": question,
+            "query_intent": intent,
+            "gold_answer": gold_answer,
+            "predicted_answer": predicted_answer,
+            "f1": f1,
+            "exact_match": exact_match_score,
+            "latency": latency,
+            "reader_used": reader_used,
+            "retrieved_count": len(retrieved_items),
+            "evidence_hit": evidence_hit,
+            "failure_bucket": bucket,
+            "retrieved": summarize_retrieved_items(retrieved_items),
+            "metadata": metadata or {},
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+        self.count += 1
+        self.counts[bucket] = self.counts.get(bucket, 0) + 1
+        return row
+
+    def summary(self) -> dict:
+        return {
+            "trace_path": str(self.path),
+            "num_traces": self.count,
+            "failure_buckets": dict(sorted(self.counts.items())),
+        }
+
+
+# ---------------------------------------------------------------------------
+# LLM Reader (optional "performance mode")
+# Set LLM_READER_MODEL to enable LLM-based answer generation from retrieved context.
+# When unset, falls back to heuristic extraction (zero LLM cost).
+# Examples: "openai/gpt-4o-mini", "anthropic/claude-sonnet-4-20250514"
+# ---------------------------------------------------------------------------
+LLM_READER_MODEL = os.environ.get("LLM_READER_MODEL", "")
+_llm_reader_client = None
+
+LLM_READER_PROMPT = """You are an expert at answering questions based on the provided memory context.
+
+Given the question and the retrieved memory items below, provide a concise, direct answer.
+
+Rules:
+- Answer ONLY based on the provided context. Do not use external knowledge.
+- Be concise — give the shortest correct answer (e.g. "Sweden", not "Caroline moved from Sweden").
+- If the answer is a date, give the date. If a name, give the name. If a number, give the number.
+- If the context does not contain enough information to answer, say "unknown".
+- Do NOT explain your reasoning. Just give the answer.
+
+Question: {question}
+
+Retrieved context:
+{context}
+
+Answer:"""
+
+
+def _get_llm_reader():
+    """Lazily initialize the LLM reader client."""
+    global _llm_reader_client
+    if _llm_reader_client is not None:
+        return _llm_reader_client
+
+    if not LLM_READER_MODEL:
+        return None
+
+    model = LLM_READER_MODEL
+
+    if model.startswith("openai/") or model.startswith("gpt"):
+        try:
+            from openai import OpenAI
+            _llm_reader_client = {
+                "provider": "openai",
+                "client": OpenAI(),
+                "model": model.replace("openai/", ""),
+            }
+            LOGGER.info("LLM reader initialized: OpenAI %s", _llm_reader_client["model"])
+            return _llm_reader_client
+        except Exception as e:
+            LOGGER.warning("Failed to init OpenAI reader: %s", e)
+            return None
+
+    elif model.startswith("anthropic/") or model.startswith("claude"):
+        try:
+            import anthropic
+            _llm_reader_client = {
+                "provider": "anthropic",
+                "client": anthropic.Anthropic(),
+                "model": model.replace("anthropic/", ""),
+            }
+            LOGGER.info("LLM reader initialized: Anthropic %s", _llm_reader_client["model"])
+            return _llm_reader_client
+        except Exception as e:
+            LOGGER.warning("Failed to init Anthropic reader: %s", e)
+            return None
+
+    elif model.startswith("google/") or model.startswith("gemini"):
+        try:
+            from google import genai
+            client = genai.Client()
+            _llm_reader_client = {
+                "provider": "google",
+                "client": client,
+                "model": model.replace("google/", ""),
+            }
+            LOGGER.info("LLM reader initialized: Google %s", _llm_reader_client["model"])
+            return _llm_reader_client
+        except Exception as e:
+            LOGGER.warning("Failed to init Google reader: %s", e)
+            return None
+
+    elif model.startswith("ollama/"):
+        try:
+            from openai import OpenAI
+            ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://192.168.64.1:11434")
+            _llm_reader_client = {
+                "provider": "openai",  # ollama is OpenAI-compatible
+                "client": OpenAI(base_url=f"{ollama_base}/v1", api_key="ollama"),
+                "model": model.replace("ollama/", ""),
+            }
+            LOGGER.info("LLM reader initialized: Ollama %s at %s", _llm_reader_client["model"], ollama_base)
+            return _llm_reader_client
+        except Exception as e:
+            LOGGER.warning("Failed to init Ollama reader: %s", e)
+            return None
+
+    else:
+        LOGGER.warning("Unknown LLM reader provider in model: %s", model)
+        return None
+
+
+def llm_read_answer(question: str, retrieved_items: list[dict]) -> str | None:
+    """Use an LLM to generate an answer from retrieved context.
+    Returns the answer string, or None if LLM reader is not configured.
+    """
+    reader = _get_llm_reader()
+    if reader is None:
+        return None
+
+    # Build context from retrieved items
+    context_parts = []
+    for i, item in enumerate(retrieved_items[:20]):
+        text = item.get("text", "")
+        val = item.get("value", "")
+        entity = item.get("entity", "")
+        ts = item.get("observed_at", "")
+        
+        parts = []
+        if entity:
+            parts.append(f"[{entity}]")
+        if ts:
+            parts.append(f"({ts})")
+        if val:
+            parts.append(val)
+        elif text:
+            parts.append(text[:500])
+        
+        if parts:
+            context_parts.append(f"{i+1}. {' '.join(parts)}")
+
+    if not context_parts:
+        return None
+
+    context = "\n".join(context_parts)
+    prompt = LLM_READER_PROMPT.format(question=question, context=context)
+
+    try:
+        if reader["provider"] == "openai":
+            resp = reader["client"].chat.completions.create(
+                model=reader["model"],
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0,
+            )
+            return resp.choices[0].message.content.strip()
+
+        elif reader["provider"] == "anthropic":
+            resp = reader["client"].messages.create(
+                model=reader["model"],
+                max_tokens=200,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+
+        elif reader["provider"] == "google":
+            from google.genai import types
+            resp = reader["client"].models.generate_content(
+                model=reader["model"],
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=200,
+                    temperature=0,
+                ),
+            )
+            return resp.text.strip()
+
+    except Exception as e:
+        LOGGER.warning("LLM reader error: %s", e)
+        return None
+
 
 # Remote GPU inference server (optional).
 # Set GPU_INFERENCE_URL to offload embedding/reranking to a GPU host.
@@ -186,8 +552,8 @@ def _reconcile_supersedes(new_items: list[dict]):
     # Group new items by (entity, property)
     ep_map = {}
     for item in new_items:
-        entity = (item.get("entity") or "").strip()
-        prop = (item.get("property") or "").strip()
+        entity = str(item.get("entity") or "").strip()
+        prop = str(item.get("property") or "").strip()
         if entity and prop:
             key = (entity.lower(), prop.lower())
             # Keep the newest item per key
@@ -267,10 +633,12 @@ def ingest_memory_items(items: list[dict], batch_size: int = 128) -> int:
         # 1b. Reconcile: auto-supersede older items with same entity+property.
         _reconcile_supersedes(batch_items)
 
-        # 2. Upsert embeddings to pg (bulk via executemany in upsert_memory_embedding)
-        for item, emb in zip(batch_items, embeddings):
-            vec = emb.tolist()
-            upsert_memory_embedding(item["id"], MODEL_NAME, vec)
+        # 2. Upsert embeddings to pg (single batch, single commit)
+        emb_rows = [
+            (item["id"], MODEL_NAME, emb.tolist())
+            for item, emb in zip(batch_items, embeddings)
+        ]
+        upsert_memory_embeddings_batch(emb_rows)
 
         # 3. Batch upsert to Qdrant
         points = []
@@ -399,12 +767,284 @@ def retrieve(
     return results, latency
 
 
+def _fetch_memory_items_by_ids(item_ids: list[str]) -> dict[str, dict]:
+    """Fetch memory_items rows by id for benchmark evidence expansion."""
+    ids = [str(x) for x in item_ids if x]
+    if not ids:
+        return {}
+    try:
+        from memory_db import POOL, MEMORY_ITEM_COLUMNS
+        with POOL.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {', '.join(MEMORY_ITEM_COLUMNS)} FROM memory_items WHERE id = ANY(%s)",
+                    (ids,),
+                )
+                rows = cur.fetchall()
+        return {str(row[0]): dict(zip(MEMORY_ITEM_COLUMNS, row)) for row in rows}
+    except Exception as e:
+        LOGGER.warning("Parent evidence fetch failed: %s", e)
+        return {}
+
+
+def _merge_ranked_items(lane_items: list[tuple[str, float, list[dict]]], limit: int) -> list[dict]:
+    """Merge lane outputs by weighted score while deduping by id/text."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for lane_name, lane_weight, items in lane_items:
+        for rank, item in enumerate(items, start=1):
+            item_id = str(item.get("id") or item.get("item_id") or "")
+            text = str(item.get("text") or "")
+            key = item_id or text
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            row = dict(item)
+            base_score = float(row.get("score") or row.get("final_score") or 0.0)
+            # Small rank discount prevents low-ranked lane tail from outranking better evidence.
+            row["score"] = (base_score * lane_weight) - (rank * 0.001)
+            row["retrieval_lane"] = lane_name
+            row["lane_weight"] = lane_weight
+            merged.append(row)
+    merged.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
+    return merged[:limit]
+
+
+def _expand_parent_evidence(items: list[dict], *, max_parents: int = 20) -> list[dict]:
+    """Add parent utterance rows for fact hits that cite source_chunk."""
+    parent_ids = []
+    existing = {str(x.get("id") or x.get("item_id") or "") for x in items}
+    for item in items:
+        if item.get("memory_type") == "fact":
+            parent_id = str(item.get("source_chunk") or "")
+            if parent_id and parent_id not in existing:
+                parent_ids.append(parent_id)
+    parents = _fetch_memory_items_by_ids(parent_ids[:max_parents])
+    if not parents:
+        return items
+
+    expanded = list(items)
+    seen = {str(x.get("id") or x.get("item_id") or "") for x in expanded}
+    child_score_by_parent = {}
+    for item in items:
+        parent_id = str(item.get("source_chunk") or "")
+        if parent_id:
+            child_score_by_parent[parent_id] = max(
+                float(item.get("score") or 0.0),
+                child_score_by_parent.get(parent_id, 0.0),
+            )
+    for parent_id in parent_ids:
+        parent = parents.get(parent_id)
+        if not parent or parent_id in seen:
+            continue
+        row = dict(parent)
+        row["score"] = max(0.0, child_score_by_parent.get(parent_id, 0.0) - 0.01)
+        row["retrieval_lane"] = "parent_evidence"
+        row["source_type"] = "parent_expansion"
+        row["expanded_from_fact"] = True
+        expanded.append(row)
+        seen.add(parent_id)
+    expanded.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
+    return expanded
+
+
+def _parse_item_time(item: dict) -> float | None:
+    """Parse item timestamp for relative temporal ordering."""
+    raw = item.get("last_confirmed") or item.get("first_seen") or item.get("observed_at")
+    if not raw:
+        return None
+    try:
+        if hasattr(raw, "timestamp"):
+            return float(raw.timestamp())
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return float(datetime.fromisoformat(text).timestamp())
+    except Exception:
+        return None
+
+
+def _apply_relative_temporal_order(items: list[dict], intent: str) -> list[dict]:
+    """Apply relative temporal ordering inside the retrieved candidate set.
+
+    This deliberately avoids absolute recency-to-now.  For latest/current/update
+    queries, newer candidates receive a relative boost. For earliest/original
+    queries, older candidates receive the boost. Retrieval scores still matter;
+    this is a rerank nudge over the already-matched candidate set.
+    """
+    if intent not in {"temporal_latest", "temporal_earliest", "contradiction_or_update"}:
+        return items
+
+    timed = [(idx, _parse_item_time(item)) for idx, item in enumerate(items)]
+    values = [ts for _, ts in timed if ts is not None]
+    if len(values) < 2:
+        return items
+
+    lo, hi = min(values), max(values)
+    span = max(hi - lo, 1.0)
+    prefer_new = intent != "temporal_earliest"
+    reranked = []
+    for idx, item in enumerate(items):
+        ts = dict(timed).get(idx)
+        row = dict(item)
+        base = float(row.get("score") or row.get("final_score") or 0.0)
+        if ts is None:
+            rel = 0.0
+        else:
+            newest = (ts - lo) / span
+            rel = newest if prefer_new else 1.0 - newest
+        # Strong enough to resolve old/new conflicts within matched results,
+        # weak enough not to replace semantic retrieval.
+        row["relative_temporal_score"] = round(rel, 6)
+        row["score"] = base + (0.25 * rel)
+        row["temporal_order_applied"] = intent
+        reranked.append(row)
+
+    reranked.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
+    return reranked
+
+
+def retrieve_typed_lanes(
+    query: str,
+    *,
+    limit: int = 10,
+    source_agent_prefix: str | None = None,
+    intent: str | None = None,
+    use_full_pipeline: bool = True,
+    expand_parents: bool = True,
+) -> tuple[list[dict], float]:
+    """Benchmark QA retrieval with typed lanes and optional parent expansion.
+
+    This is intentionally separate from production `retrieve()`. It prevents
+    derived facts and raw utterances from competing in one undifferentiated
+    pool, then adds parent utterances for source-backed fact hits.
+    """
+    try:
+        q_intent = intent or classify_query_intent(query)
+    except Exception:
+        q_intent = intent or "unknown"
+
+    t0 = time.perf_counter()
+
+    # Lane plan: high-precision fact lane first for direct/detail queries;
+    # conversation lane remains present for context/narrative evidence.
+    if q_intent in {"direct_fact", "preference", "temporal_when", "temporal_latest", "temporal_earliest", "temporal_range", "contradiction_or_update", "aggregation_count"}:
+        fact_limit = max(limit * 3, 20)
+        conv_limit = max(limit * 2, 12)
+        fact_weight = 1.15
+        conv_weight = 1.00
+    elif q_intent in {"multi_hop", "open_ended_summary"}:
+        fact_limit = max(limit * 2, 12)
+        conv_limit = max(limit * 3, 20)
+        fact_weight = 1.00
+        conv_weight = 1.10
+    else:
+        fact_limit = max(limit * 2, 12)
+        conv_limit = max(limit * 2, 12)
+        fact_weight = 1.05
+        conv_weight = 1.00
+
+    lane_outputs: list[tuple[str, float, list[dict]]] = []
+    for lane_name, memory_type, lane_limit, lane_weight in [
+        ("fact", "fact", fact_limit, fact_weight),
+        ("conversation", "conversation", conv_limit, conv_weight),
+    ]:
+        try:
+            rows, _ = retrieve(
+                query,
+                limit=lane_limit,
+                source_agent_prefix=source_agent_prefix,
+                memory_type_filter=memory_type,
+                use_full_pipeline=use_full_pipeline,
+            )
+            # Safety post-filter: ensures prefix is respected even if SQL path didn't filter.
+            if source_agent_prefix:
+                rows = [r for r in rows if str(r.get("source_agent") or "").startswith(source_agent_prefix)]
+            lane_outputs.append((lane_name, lane_weight, rows))
+        except Exception as e:
+            LOGGER.warning("Typed retrieval lane %s failed: %s", lane_name, e)
+
+    merged = _merge_ranked_items(lane_outputs, limit=max(limit * 3, limit + 10))
+    if expand_parents:
+        merged = _expand_parent_evidence(merged)
+    merged = _apply_relative_temporal_order(merged, q_intent)
+    merged = merged[:limit]
+    return merged, time.perf_counter() - t0
+
+
+def retrieve_and_answer(
+    query: str,
+    *,
+    limit: int = 10,
+    source_agent_prefix: str | None = None,
+    entity_filter: str | None = None,
+    session_filter: str | None = None,
+    memory_type_filter: str | None = None,
+    use_full_pipeline: bool = True,
+) -> tuple[str, list[dict], float]:
+    """
+    Retrieve + optionally generate answer via LLM reader.
+    Returns (answer_text, results, latency_seconds).
+
+    If LLM_READER_MODEL is set, uses the LLM to generate an answer from context.
+    Otherwise returns the top result's text (same as before).
+    """
+    results, latency = retrieve(
+        query, limit=limit,
+        source_agent_prefix=source_agent_prefix,
+        entity_filter=entity_filter,
+        session_filter=session_filter,
+        memory_type_filter=memory_type_filter,
+        use_full_pipeline=use_full_pipeline,
+    )
+
+    # Try LLM reader first
+    llm_answer = llm_read_answer(query, results)
+    if llm_answer is not None:
+        return llm_answer, results, latency
+
+    # Fallback: return top result text
+    if results:
+        val = results[0].get("value", "")
+        if val and len(val) > 3:
+            return val, results, latency
+        return results[0].get("text", "")[:300], results, latency
+
+    return "", results, latency
+
+
 # Cache the cross-encoder model at module level to avoid reloading per query
 _reranker_model = None
+_RERANKER_DISABLED = object()
+
+
+def _benchmark_reranker_disabled() -> bool:
+    """Return True when benchmark reranking should be skipped.
+
+    Smoke tests must be able to run even when the optional cross-encoder model
+    is not cached.  Without this guard, `CrossEncoder(...)` can block on a slow
+    HuggingFace download and prevent end-to-end validation of the rest of the
+    memory pipeline.
+    """
+    return os.environ.get("OPENCLAW_BENCHMARK_DISABLE_RERANKER", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _cross_encoder_cache_incomplete() -> bool:
+    """Detect a partial local HuggingFace cross-encoder cache."""
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub" / "models--cross-encoder--ms-marco-MiniLM-L-6-v2"
+    return cache_root.exists() and any(cache_root.rglob("*.incomplete"))
 
 
 def _get_reranker():
     global _reranker_model
+    if _reranker_model is _RERANKER_DISABLED:
+        return None
+    if _benchmark_reranker_disabled():
+        _reranker_model = _RERANKER_DISABLED
+        LOGGER.info("Benchmark cross-encoder reranker disabled by OPENCLAW_BENCHMARK_DISABLE_RERANKER")
+        return None
     if _reranker_model is None:
         if _remote_gpu_available():
             # Return a lightweight proxy that calls the remote GPU server
@@ -418,9 +1058,13 @@ def _get_reranker():
             _reranker_model = _RemoteReranker()
             LOGGER.info("Using remote GPU reranker at %s", GPU_INFERENCE_URL)
         else:
+            if _cross_encoder_cache_incomplete():
+                _reranker_model = _RERANKER_DISABLED
+                LOGGER.warning("Skipping benchmark cross-encoder reranker: incomplete local HuggingFace cache")
+                return None
             from sentence_transformers import CrossEncoder
-            _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            LOGGER.info("Loaded cross-encoder reranker: cross-encoder/ms-marco-MiniLM-L-6-v2")
+            _reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", local_files_only=True)
+            LOGGER.info("Loaded cross-encoder reranker from local cache: cross-encoder/ms-marco-MiniLM-L-6-v2")
     return _reranker_model
 
 
@@ -611,14 +1255,15 @@ def _retrieve_full_pipeline(
 
         try:
             reranker = _get_reranker()
-            pairs = [[query, row["text"]] for row in head]
-            raw_scores = reranker.predict(pairs)
+            if reranker is not None:
+                pairs = [[query, row["text"]] for row in head]
+                raw_scores = reranker.predict(pairs)
 
-            for row, raw in zip(head, raw_scores):
-                row["rerank_score"] = sigmoid(float(raw))
-                row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
+                for row, raw in zip(head, raw_scores):
+                    row["rerank_score"] = sigmoid(float(raw))
+                    row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)
 
-            head.sort(key=lambda x: -x["score"])
+                head.sort(key=lambda x: -x["score"])
             scored = head + tail
         except Exception as e:
             LOGGER.warning("Cross-encoder reranking failed: %s", e)
@@ -658,7 +1303,7 @@ def _retrieve_full_pipeline(
 
 def normalize_answer(s: str) -> str:
     """Lowercase, remove punctuation/articles, collapse whitespace."""
-    s = s.lower()
+    s = str(s).lower()
     s = re.sub(r"\b(a|an|the)\b", " ", s)
     s = re.sub(r"[^\w\s]", " ", s)
     s = " ".join(s.split())
@@ -762,21 +1407,58 @@ def count_tokens_list(texts: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Sentinel gold value marking an unanswerable/abstention question.
+NO_ANSWER_SENTINEL = "__NO_ANSWER__"
+
+
+class JudgeError(Exception):
+    """Raised by llm_judge_answer when strict_judge=True and the judge call fails.
+
+    In the bake-off path we must NOT silently substitute token_f1 on a judge
+    outage (that fabricates scores); the caller marks the item judge_error and
+    excludes it from accuracy instead."""
+
+
 def llm_judge_answer(
     question: str,
     gold_answer: str,
     predicted_answer: str,
     *,
     model: str = "claude-opus-4-6",
+    strict_judge: bool = False,
 ) -> float:
     """
     Use an LLM to judge whether predicted_answer is correct given gold_answer.
+    Supports Anthropic by default and OpenAI-compatible Ollama via
+    model="ollama/<model>" (for example: ollama/qwen3:32b).
     Returns score in [0, 1].
-    """
-    try:
-        import anthropic
 
-        client = anthropic.Anthropic()
+    strict_judge=True: on any judge failure, raise JudgeError instead of the
+    legacy silent token_f1 fallback (used by the bake-off so an outage can't fake
+    scores). Default False preserves all existing callers' behavior.
+
+    Abstention: when gold_answer == NO_ANSWER_SENTINEL the question is treated as
+    unanswerable and an abstention-specific rubric is used. For all other gold
+    values the prompt is byte-for-byte the legacy answerable prompt, so answerable
+    scoring is unchanged.
+    """
+    import re
+
+    is_abstention = str(gold_answer).strip() == NO_ANSWER_SENTINEL
+
+    if is_abstention:
+        prompt = f"""You are evaluating a question-answering system.
+
+Question: {question}
+Ground Truth: This question is UNANSWERABLE from the available information.
+Predicted Answer: {predicted_answer}
+
+A correct prediction abstains or says the answer cannot be determined / is not
+stated. A confident specific answer is INCORRECT. Score 1.0 for a correct
+abstention, 0.0 for a confident specific (non-abstaining) answer.
+Respond with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<brief reason>"}}
+Do not include chain-of-thought, markdown, or any text outside the JSON object."""
+    else:
         prompt = f"""You are evaluating a question-answering system.
 
 Question: {question}
@@ -784,17 +1466,58 @@ Ground Truth Answer: {gold_answer}
 Predicted Answer: {predicted_answer}
 
 Is the predicted answer correct? Consider partial credit for partially correct answers.
-Respond with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<brief reason>"}}"""
+Respond with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<brief reason>"}}
+Do not include chain-of-thought, markdown, or any text outside the JSON object."""
 
+    def _score_from_text(text: str) -> float:
+        text = text.strip()
+        # Qwen-style models can still emit a thinking block; strip it if present.
+        text = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+        match = re.search(r"\{.*\}", text, re.S)
+        data = json.loads(match.group(0) if match else text)
+        return max(0.0, min(1.0, float(data.get("score", 0.0))))
+
+    try:
+        if model.startswith("ollama/"):
+            from openai import OpenAI
+
+            ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://192.168.64.1:11435")
+            client = OpenAI(base_url=f"{ollama_base}/v1", api_key="ollama")
+            resp = client.chat.completions.create(
+                model=model.removeprefix("ollama/"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=200,
+            )
+            text = resp.choices[0].message.content or ""
+            return _score_from_text(text)
+
+        if model.startswith("openai/") or model.startswith("gpt"):
+            from openai import OpenAI
+
+            client = OpenAI()
+            resp = client.chat.completions.create(
+                model=model.removeprefix("openai/"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=200,
+            )
+            text = resp.choices[0].message.content or ""
+            return _score_from_text(text)
+
+        import anthropic
+
+        client = anthropic.Anthropic()
         msg = client.messages.create(
-            model=model,
+            model=model.removeprefix("anthropic/"),
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}],
         )
         text = msg.content[0].text.strip()
-        data = json.loads(text)
-        return float(data.get("score", 0.0))
+        return _score_from_text(text)
     except Exception as e:
+        if strict_judge:
+            raise JudgeError(str(e)) from e
         LOGGER.warning("LLM judge failed: %s. Falling back to F1.", e)
         return token_f1(predicted_answer, gold_answer)
 

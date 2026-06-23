@@ -114,6 +114,7 @@ def conversation_to_memory_items(
     import sys
     sys.path.insert(0, str(BENCHMARKS_DIR))
     from common import make_memory_item
+    from fact_extractor import extract_typed_facts
 
     # Extract speaker names
     speaker_a = conversation.get("speaker_a", "A") if isinstance(conversation, dict) else "A"
@@ -182,44 +183,79 @@ def conversation_to_memory_items(
             item["last_confirmed"] = date
         items.append(item)
 
-        # Also extract and store individual sentences as facts.
-        # This gives the answer extractor concise candidates to match
-        # against gold answers instead of only raw dialog turns.
-        for si, sent in enumerate(text_content.replace(". ", ".\n").replace("! ", "!\n").split("\n")):
-            sent = sent.strip()
-            if len(sent) > 15 and len(sent) < 200:
-                fact_text = f"{speaker} said: {sent}" if date is None else f"[{date}] {speaker}: {sent}"
-                fact_item = make_memory_item(
-                    fact_text,
-                    source_agent=source_agent,
-                    source_session=source_session,
-                    entity=speaker,
-                    property="fact",
-                    value=sent,
-                    memory_type="fact",
-                    scope="benchmark",
-                    tags=["locomo", f"session_{session_num}", "extracted"],
-                    item_id=f"{source_session}_dia{dia_id}_s{si}",
-                )
-                if date:
-                    fact_item["first_seen"] = date
-                    fact_item["last_confirmed"] = date
-                items.append(fact_item)
+        # Add high-precision derived facts linked to the parent utterance.
+        # This replaces the old sentence-splitting approach, which created
+        # noisy pseudo-facts and diluted retrieval.
+        parent_id = item["id"]
+        # Use timestamped full_text for extraction so relative dates like
+        # "yesterday" / "last year" can be normalized against the dialogue date.
+        for fi, fact in enumerate(extract_typed_facts(full_text, speaker=speaker, source_id=parent_id)):
+            fact_text = f"{fact.subject} {fact.predicate.replace('_', ' ')}: {fact.value}"
+            if date:
+                fact_text = f"[{date}] {fact_text}"
+            fact_item = make_memory_item(
+                fact_text,
+                source_agent=source_agent,
+                source_session=source_session,
+                entity=fact.subject,
+                property=fact.predicate,
+                value=fact.value[:200],
+                memory_type="fact",
+                scope="benchmark",
+                tags=["locomo", f"session_{session_num}", "typed_fact", fact.fact_type],
+                item_id=f"{source_session}_dia{dia_id}_f{fi}",
+            )
+            fact_item["source_chunk"] = parent_id
+            fact_item["confidence"] = fact.confidence
+            fact_item["notes"] = json.dumps({
+                "fact_type": fact.fact_type,
+                "source_id": fact.source_id,
+                "evidence_text": fact.evidence_text,
+                "qualifiers": fact.qualifiers,
+                "extractor": "typed_dialogue_v1",
+            }, sort_keys=True)
+            if date:
+                fact_item["first_seen"] = date
+                fact_item["last_confirmed"] = date
+            items.append(fact_item)
 
     return items
 
 
 def get_qa_pairs(conv_data: dict) -> list[dict]:
     """Extract QA pairs from a LoCoMo conversation entry."""
+    import sys as _sys
+    _sys.path.insert(0, str(BENCHMARKS_DIR))
+    from common import NO_ANSWER_SENTINEL
+
     qa_list = conv_data.get("qa", conv_data.get("QA", []))
     result = []
     for qa in qa_list:
-        # Handle different possible field names
         question = qa.get("question", qa.get("q", ""))
-        answer = str(qa.get("answer", qa.get("a", "")))
         category = str(qa.get("category", qa.get("type", "unknown")))
         evidences = qa.get("evidences", qa.get("evidence", []))
 
+        # LoCoMo category 5 = adversarial/UNANSWERABLE. These items have NO
+        # `answer` field; the gold lives in `adversarial_answer` and represents the
+        # plausible-but-wrong distractor the model must NOT assert. The correct
+        # behavior is to abstain, so gold = the no-answer sentinel and we carry the
+        # distractor separately for diagnostics. Without this, every cat-5 gold was
+        # an empty string and the whole adversarial category was mis-scored.
+        if category == "5" or "adversarial_answer" in qa:
+            distractor = str(qa.get("adversarial_answer", ""))
+            if not question:
+                continue
+            result.append({
+                "question": question,
+                "answer": NO_ANSWER_SENTINEL,
+                "category": category,
+                "unanswerable": True,
+                "distractor": distractor,
+                "evidences": evidences if isinstance(evidences, list) else [evidences],
+            })
+            continue
+
+        answer = str(qa.get("answer", qa.get("a", "")))
         if not question or not answer:
             continue
 
@@ -227,6 +263,7 @@ def get_qa_pairs(conv_data: dict) -> list[dict]:
             "question": question,
             "answer": answer,
             "category": category,
+            "unanswerable": False,
             "evidences": evidences if isinstance(evidences, list) else [evidences],
         })
 
