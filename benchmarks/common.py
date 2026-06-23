@@ -986,6 +986,134 @@ def retrieve_typed_lanes(
     return merged, time.perf_counter() - t0
 
 
+# Connective words that signal a question spans MULTIPLE entities/events and thus
+# needs more than one retrieval probe (e.g. "what do X and Y have in common",
+# "which city did both A and B visit"). A single dense query for the *joint*
+# phrasing tends to retrieve neither side's specific evidence well.
+_MULTIHOP_TRIGGERS = re.compile(
+    r"\b(both|in common|each other|compare|comparison|difference between|"
+    r"versus|vs\.?|as well as|along with)\b",
+    re.IGNORECASE,
+)
+# Proper-noun-ish capitalized tokens (entity candidates). Deliberately simple:
+# LoCoMo/LongMemEval speakers are first names. We avoid an NER dependency.
+_CAPWORD = re.compile(r"\b([A-Z][a-z]{2,})\b")
+_STOP_CAPS = {
+    "What", "When", "Where", "Which", "Who", "Why", "How", "Did", "Does", "Do",
+    "Is", "Are", "Was", "Were", "The", "Their", "They", "Both", "And",
+}
+
+
+def _extract_entity_subqueries(question: str) -> list[str]:
+    """Decompose a multi-entity question into per-entity sub-queries.
+
+    "Which city have both Jean and John visited?" ->
+        ["Which city have Jean visited?", "Which city have John visited?"]
+    Falls back to [] when fewer than 2 distinct entity candidates are found.
+    """
+    entities = []
+    for m in _CAPWORD.finditer(question or ""):
+        tok = m.group(1)
+        if tok in _STOP_CAPS or tok in entities:
+            continue
+        entities.append(tok)
+    if len(entities) < 2:
+        return []
+    # Build one probe per entity by removing the OTHER entity names + connectives.
+    subs = []
+    for keep in entities:
+        probe = question
+        for other in entities:
+            if other == keep:
+                continue
+            # drop "and Other", "both Other", or bare "Other"
+            probe = re.sub(rf"\b(and|both)\s+{re.escape(other)}\b", "", probe)
+            probe = re.sub(rf"\b{re.escape(other)}\b", "", probe)
+        probe = _MULTIHOP_TRIGGERS.sub("", probe)
+        # Clean up connective/preposition debris left by entity removal so the
+        # sub-query reads naturally (e.g. "What do and Gina have" -> "What do Gina
+        # have"; "When was in Paris" -> "When was in Paris" stays, but a dangling
+        # leading/trailing "and"/"in"/"with" is dropped).
+        probe = re.sub(r"\b(and|both|as well as|along with)\b\s+", " ", probe)
+        probe = re.sub(r"\s+(and|both|with|as well as|along with)\b", " ", probe)
+        probe = re.sub(r"\s+([?.!,;:])", r"\1", probe)
+        probe = re.sub(r"\s{2,}", " ", probe).strip()
+        if probe and probe not in subs:
+            subs.append(probe)
+    return subs if len(subs) >= 2 else []
+
+
+def retrieve_multihop(
+    query: str,
+    *,
+    limit: int = 10,
+    source_agent_prefix: str | None = None,
+    intent: str | None = None,
+    use_full_pipeline: bool = True,
+    expand_parents: bool = True,
+) -> tuple[list[dict], float, dict]:
+    """Recall-oriented retrieval for multi-hop / aggregation / multi-entity QA.
+
+    Strategy (purely additive over retrieve_typed_lanes):
+      1. Always run the base typed-lane retrieval for the original query.
+      2. If the question triggers a multi-entity pattern ("both A and B",
+         "in common", ...), decompose into per-entity sub-queries and retrieve
+         EACH separately, so both sides' evidence reaches the reader instead of
+         being crowded out by the joint-phrasing query.
+      3. Merge all candidate pools (deduped by id/text), preserving the best
+         score per item, then take the top `limit`.
+
+    Returns (results, latency_seconds, diag) where diag reports what fired, so
+    the benchmark trace can attribute gains to the multi-hop path honestly.
+    """
+    t0 = time.perf_counter()
+    q_intent = intent or classify_query_intent(query)
+
+    base, _ = retrieve_typed_lanes(
+        query, limit=limit, source_agent_prefix=source_agent_prefix,
+        intent=q_intent, use_full_pipeline=use_full_pipeline,
+        expand_parents=expand_parents,
+    )
+
+    subqueries: list[str] = []
+    is_multientity = bool(_MULTIHOP_TRIGGERS.search(query or ""))
+    if is_multientity or q_intent in {"multi_hop", "aggregation_count", "open_ended_summary"}:
+        subqueries = _extract_entity_subqueries(query)
+
+    if not subqueries:
+        # No decomposition applicable — base result is the answer. Keep the same
+        # 3-tuple contract so callers don't branch.
+        return base[:limit], time.perf_counter() - t0, {
+            "multihop_fired": False,
+            "subqueries": [],
+            "base_n": len(base),
+        }
+
+    # Per-entity sub-retrievals. Pull a few extra per sub-query so the merge has
+    # real material to work with, then dedup down to `limit`.
+    sub_limit = max(limit // max(len(subqueries), 1), 4)
+    pools: list[tuple[str, float, list[dict]]] = [("base", 1.05, base)]
+    for sq in subqueries:
+        try:
+            rows, _ = retrieve_typed_lanes(
+                sq, limit=sub_limit, source_agent_prefix=source_agent_prefix,
+                use_full_pipeline=use_full_pipeline, expand_parents=expand_parents,
+            )
+            pools.append((f"hop:{sq[:24]}", 1.0, rows))
+        except Exception as e:
+            LOGGER.warning("Multi-hop sub-query failed (%s): %s", sq, e)
+
+    merged = _merge_ranked_items(pools, limit=max(limit * 3, limit + 10))
+    merged = _apply_relative_temporal_order(merged, q_intent)
+    merged = merged[:limit]
+    return merged, time.perf_counter() - t0, {
+        "multihop_fired": True,
+        "subqueries": subqueries,
+        "base_n": len(base),
+        "merged_n": len(merged),
+    }
+
+
 def retrieve_and_answer(
     query: str,
     *,

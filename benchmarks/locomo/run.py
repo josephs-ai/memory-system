@@ -37,6 +37,7 @@ from common import (
     llm_judge_answer,
     llm_read_answer,
     retrieve,
+    retrieve_multihop,
     retrieve_typed_lanes,
     save_results,
     token_f1,
@@ -347,7 +348,7 @@ def run_locomo(
             is_unanswerable = bool(qa.get("unanswerable")) or gold_answer == NO_ANSWER_SENTINEL
             qid = f"{conv_id}:{len(all_results)}"
 
-            results, latency = retrieve_typed_lanes(question, limit=10, source_agent_prefix=run_id)
+            results, latency, mh_diag = retrieve_multihop(question, limit=10, source_agent_prefix=run_id)
             latencies.append(latency)
 
             retrieved_texts = [r.get("text", "") for r in results]
@@ -452,6 +453,8 @@ def run_locomo(
                 "query_intent": trace_row["query_intent"],
                 "evidence_hit": trace_row["evidence_hit"],
                 "failure_bucket": trace_row["failure_bucket"],
+                "multihop_fired": mh_diag.get("multihop_fired", False),
+                "multihop_subqueries": mh_diag.get("subqueries", []),
             })
 
         # --- Cleanup ---
