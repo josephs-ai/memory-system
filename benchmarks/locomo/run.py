@@ -24,13 +24,20 @@ BENCHMARKS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BENCHMARKS_DIR))
 sys.path.insert(0, str(BENCHMARKS_DIR.parent / "scripts"))
 
+from reader import read_answer_str
 from common import (
+    BenchmarkTraceWriter,
+    JudgeError,
+    NO_ANSWER_SENTINEL,
     cleanup_benchmark_items,
     compute_percentiles,
     count_tokens_list,
     exact_match,
     ingest_memory_items,
+    llm_judge_answer,
+    llm_read_answer,
     retrieve,
+    retrieve_typed_lanes,
     save_results,
     token_f1,
 )
@@ -238,19 +245,46 @@ def extract_answer_from_results(results: list[dict], gold: str, question: str = 
     return scored[0][1]
 
 
+# Sentinel passed to the judge when OUR reader abstains (returns None). The
+# abstention-aware judge rubric rewards this on unanswerable (cat-5) questions and
+# penalizes it on answerable ones — symmetric, same rule for both systems.
+ABSTAIN_PREDICTION = "I cannot determine the answer from the available information."
+
+# Headline metric: an item is judged CORRECT iff judge score >= this threshold.
+# Pinned (pre-registered) per the bake-off plan; no post-hoc tuning.
+JUDGE_CORRECT_THRESHOLD = 0.5
+
+# If the judge_error rate exceeds this fraction of scored items, the run is INVALID
+# (silent exclusion could otherwise drop a biased subset and still report a clean
+# number). Pinned per plan.
+JUDGE_ERROR_INVALID_RATE = 0.02
+
+
 def run_locomo(
     max_convs: int | None = None,
     max_qa_per_conv: int | None = None,
     do_cleanup: bool = True,
     force_download: bool = False,
+    *,
+    use_judge: bool = True,
+    judge_model: str = "openai/gpt-4o",
 ) -> dict:
-    """Run LoCoMo benchmark. Returns results dict."""
+    """Run LoCoMo benchmark. Returns results dict.
+
+    When use_judge=True (default for the bake-off), each QA answer is scored by an
+    LLM judge via the strict path (llm_judge_answer(strict_judge=True)). A judge
+    exception marks the item judge_error and EXCLUDES it from judged accuracy (it is
+    never silently scored by token_f1). token_f1/EM are retained as secondary
+    metrics. Cat-5 (adversarial/unanswerable) items use the abstention rubric and
+    are reported on a SEPARATE line, never blended into overall answerable accuracy.
+    """
 
     if force_download:
         download_dataset(force=True)
 
     data = load_dataset(max_convs=max_convs)
-    LOGGER.info("Evaluating %d conversations", len(data))
+    LOGGER.info("Evaluating %d conversations (judge=%s, judge_model=%s)",
+                len(data), use_judge, judge_model if use_judge else "off")
 
     all_results = []
     latencies: list[float] = []
@@ -258,6 +292,7 @@ def run_locomo(
     f1_scores: list[float] = []
     em_scores: list[float] = []
     category_stats: dict[str, dict] = {}
+    trace_writer = BenchmarkTraceWriter("locomo", run_label=f"convs_{len(data)}")
 
     for conv_idx, (conv_id, conv_data) in enumerate(data.items()):
         conversation = conv_data.get("conversation", conv_data.get("dialog", []))
@@ -291,26 +326,95 @@ def run_locomo(
             question = qa["question"]
             gold_answer = str(qa["answer"])
             category = qa["category"]
+            is_unanswerable = bool(qa.get("unanswerable")) or gold_answer == NO_ANSWER_SENTINEL
+            qid = f"{conv_id}:{len(all_results)}"
 
-            results, latency = retrieve(question, limit=10, source_agent_prefix=run_id)
+            results, latency = retrieve_typed_lanes(question, limit=10, source_agent_prefix=run_id)
             latencies.append(latency)
 
             retrieved_texts = [r.get("text", "") for r in results]
             token_counts.append(count_tokens_list(retrieved_texts))
 
-            predicted = extract_answer_from_results(results, gold_answer, question=question)
+            # Intent-routed reader with structured answer contract. A None return
+            # means the reader ABSTAINED. We honor the abstention as the prediction
+            # rather than masking it with a heuristic guess — the judge's
+            # abstention rubric (gold == NO_ANSWER_SENTINEL) rewards it on cat-5 and
+            # penalizes it on answerable categories.
+            llm_answer = read_answer_str(question, results)
+            reader_used = llm_answer is not None
+            abstained = llm_answer is None
+            if reader_used:
+                predicted = llm_answer
+            elif is_unanswerable:
+                # Reader abstained on an unanswerable question — that IS the answer.
+                predicted = ABSTAIN_PREDICTION
+            else:
+                predicted = extract_answer_from_results(results, gold_answer, question=question)
 
             f1 = token_f1(predicted, gold_answer)
             em = exact_match(predicted, gold_answer)
             f1_scores.append(f1)
             em_scores.append(em)
 
-            # Category breakdown
-            if category not in category_stats:
-                category_stats[category] = {"f1_sum": 0.0, "em_sum": 0.0, "count": 0}
-            category_stats[category]["f1_sum"] += f1
-            category_stats[category]["em_sum"] += em
-            category_stats[category]["count"] += 1
+            # --- LLM judge (strict path) ---
+            judge_score = None
+            judged_correct = None
+            judge_error = False
+            judge_error_msg = None
+            if use_judge:
+                try:
+                    judge_score = llm_judge_answer(
+                        question,
+                        gold_answer,
+                        predicted,
+                        model=judge_model,
+                        strict_judge=True,
+                    )
+                    judged_correct = judge_score >= JUDGE_CORRECT_THRESHOLD
+                except JudgeError as e:
+                    judge_error = True
+                    judge_error_msg = str(e)
+                    LOGGER.warning("judge_error on %s: %s", qid, judge_error_msg)
+
+            # Category breakdown (token_f1/EM kept as secondary metrics)
+            cs = category_stats.setdefault(
+                category,
+                {"f1_sum": 0.0, "em_sum": 0.0, "count": 0,
+                 "judge_score_sum": 0.0, "judge_correct": 0, "judge_scored": 0,
+                 "judge_error": 0, "unanswerable": is_unanswerable},
+            )
+            cs["f1_sum"] += f1
+            cs["em_sum"] += em
+            cs["count"] += 1
+            if use_judge:
+                if judge_error:
+                    cs["judge_error"] += 1
+                else:
+                    cs["judge_score_sum"] += judge_score
+                    cs["judge_scored"] += 1
+                    if judged_correct:
+                        cs["judge_correct"] += 1
+
+            trace_row = trace_writer.record(
+                question_id=qid,
+                question=question,
+                gold_answer=gold_answer,
+                predicted_answer=predicted,
+                retrieved_items=results,
+                f1=f1,
+                exact_match_score=em,
+                latency=latency,
+                reader_used=reader_used,
+                metadata={
+                    "conv_id": conv_id,
+                    "category": category,
+                    "unanswerable": is_unanswerable,
+                    "abstained": abstained,
+                    "judge_score": judge_score,
+                    "judged_correct": judged_correct,
+                    "judge_error": judge_error,
+                },
+            )
 
             all_results.append({
                 "conv_id": conv_id,
@@ -318,9 +422,18 @@ def run_locomo(
                 "gold_answer": gold_answer,
                 "predicted": predicted,
                 "category": category,
+                "unanswerable": is_unanswerable,
+                "abstained": abstained,
                 "f1": f1,
                 "exact_match": em,
+                "judge_score": judge_score,
+                "judged_correct": judged_correct,
+                "judge_error": judge_error,
+                "judge_error_msg": judge_error_msg,
                 "latency": latency,
+                "query_intent": trace_row["query_intent"],
+                "evidence_hit": trace_row["evidence_hit"],
+                "failure_bucket": trace_row["failure_bucket"],
             })
 
         # --- Cleanup ---
@@ -337,16 +450,23 @@ def run_locomo(
     lat_stats = compute_percentiles(latencies)
     avg_tokens = sum(token_counts) / max(1, len(token_counts))
 
-    cat_summary = {
-        cat: {
+    cat_summary = {}
+    for cat, v in category_stats.items():
+        entry = {
             "avg_f1": v["f1_sum"] / v["count"],
             "avg_em": v["em_sum"] / v["count"],
             "count": v["count"],
+            "unanswerable": v.get("unanswerable", False),
         }
-        for cat, v in category_stats.items()
-    }
+        if use_judge:
+            scored = v["judge_scored"]
+            entry["judge_scored"] = scored
+            entry["judge_error"] = v["judge_error"]
+            entry["judge_accuracy"] = (v["judge_correct"] / scored) if scored else None
+            entry["judge_mean_float"] = (v["judge_score_sum"] / scored) if scored else None
+        cat_summary[cat] = entry
 
-    return {
+    out = {
         "benchmark": "LoCoMo",
         "score": avg_f1,
         "avg_f1": avg_f1,
@@ -357,8 +477,72 @@ def run_locomo(
         "num_qa_pairs": len(all_results),
         "num_conversations": len(data),
         "by_category": cat_summary,
+        "trace": trace_writer.summary(),
         "per_question": all_results,
     }
+
+    if use_judge:
+        # Split answerable vs abstention; report judged accuracy on each, plus a
+        # judge_error rate that can INVALIDATE the run.
+        ans_correct = ans_scored = ans_float_sum = 0
+        abs_correct = abs_scored = abs_float_sum = 0
+        judge_errors = 0
+        for r in all_results:
+            if r["judge_error"]:
+                judge_errors += 1
+                continue
+            if r["judge_score"] is None:
+                continue
+            if r["unanswerable"]:
+                abs_scored += 1
+                abs_float_sum += r["judge_score"]
+                if r["judged_correct"]:
+                    abs_correct += 1
+            else:
+                ans_scored += 1
+                ans_float_sum += r["judge_score"]
+                if r["judged_correct"]:
+                    ans_correct += 1
+
+        total_items = len(all_results)
+        judge_error_rate = judge_errors / max(1, total_items)
+        invalid = judge_error_rate > JUDGE_ERROR_INVALID_RATE
+
+        out["judge"] = {
+            "judge_model": judge_model,
+            "strict_judge": True,
+            "correct_threshold": JUDGE_CORRECT_THRESHOLD,
+            "judge_error_invalid_rate": JUDGE_ERROR_INVALID_RATE,
+            "total_items": total_items,
+            "judge_errors": judge_errors,
+            "judge_error_rate": judge_error_rate,
+            "invalid": invalid,
+            # Headline = answerable judged accuracy (>=0.5). Abstention reported separately.
+            "answerable": {
+                "scored": ans_scored,
+                "accuracy": (ans_correct / ans_scored) if ans_scored else None,
+                "mean_float": (ans_float_sum / ans_scored) if ans_scored else None,
+            },
+            "abstention": {
+                "scored": abs_scored,
+                "accuracy": (abs_correct / abs_scored) if abs_scored else None,
+                "mean_float": (abs_float_sum / abs_scored) if abs_scored else None,
+            },
+        }
+        # Overall judged accuracy across ALL scored items (answerable + abstention),
+        # for convenience; the plan's headline is the answerable line.
+        all_scored = ans_scored + abs_scored
+        all_correct = ans_correct + abs_correct
+        all_float = ans_float_sum + abs_float_sum
+        out["judge"]["overall"] = {
+            "scored": all_scored,
+            "accuracy": (all_correct / all_scored) if all_scored else None,
+            "mean_float": (all_float / all_scored) if all_scored else None,
+        }
+        out["score"] = out["judge"]["answerable"]["accuracy"] if ans_scored else (
+            out["judge"]["overall"]["accuracy"])
+
+    return out
 
 
 def main():
@@ -370,6 +554,10 @@ def main():
     parser.add_argument("--no-cleanup", action="store_true")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--save", action="store_true")
+    parser.add_argument("--judge-model", type=str, default="openai/gpt-4o",
+                        help="LLM judge model (default: openai/gpt-4o)")
+    parser.add_argument("--no-judge", action="store_true",
+                        help="Disable the LLM judge (token_f1/EM only)")
     args = parser.parse_args()
 
     results = run_locomo(
@@ -377,19 +565,44 @@ def main():
         max_qa_per_conv=args.max_qa,
         do_cleanup=not args.no_cleanup,
         force_download=args.download,
+        use_judge=not args.no_judge,
+        judge_model=args.judge_model,
     )
 
     print("\n--- LoCoMo Results ---")
     print(f"  Conversations: {results.get('num_conversations', 0)}")
     print(f"  QA Pairs:      {results.get('num_qa_pairs', 0)}")
-    print(f"  Avg F1:        {results.get('avg_f1', 0):.3f}")
-    print(f"  Avg EM:        {results.get('avg_exact_match', 0):.3f}")
+    print(f"  Avg F1 (sec):  {results.get('avg_f1', 0):.3f}")
+    print(f"  Avg EM (sec):  {results.get('avg_exact_match', 0):.3f}")
     print(f"  Latency p50:   {results.get('latency_p50', 0)*1000:.1f}ms")
     print(f"  Latency p95:   {results.get('latency_p95', 0)*1000:.1f}ms")
     print(f"  Tokens avg:    {results.get('tokens_avg', 0):.0f}")
+
+    judge = results.get("judge")
+    if judge:
+        print("\n  === JUDGED (headline) ===")
+        print(f"  Judge model:   {judge['judge_model']}  (strict, thr>={judge['correct_threshold']})")
+        ans = judge["answerable"]
+        ab = judge["abstention"]
+        ov = judge["overall"]
+        def _fmt(x):
+            return f"{x:.3f}" if x is not None else "n/a"
+        print(f"  Answerable:    acc={_fmt(ans['accuracy'])}  mean_float={_fmt(ans['mean_float'])}  n={ans['scored']}")
+        print(f"  Abstention:    acc={_fmt(ab['accuracy'])}  mean_float={_fmt(ab['mean_float'])}  n={ab['scored']}")
+        print(f"  Overall:       acc={_fmt(ov['accuracy'])}  mean_float={_fmt(ov['mean_float'])}  n={ov['scored']}")
+        print(f"  judge_errors:  {judge['judge_errors']}/{judge['total_items']} "
+              f"(rate={judge['judge_error_rate']*100:.2f}%, cap={judge['judge_error_invalid_rate']*100:.0f}%) "
+              f"=> {'INVALID' if judge['invalid'] else 'valid'}")
+
     print("\n  By category:")
     for cat, v in results.get("by_category", {}).items():
-        print(f"    {cat:<20} f1={v['avg_f1']:.3f}  em={v['avg_em']:.3f}  n={v['count']}")
+        ja = v.get("judge_accuracy")
+        jm = v.get("judge_mean_float")
+        ja_s = f"{ja:.3f}" if ja is not None else "n/a"
+        jm_s = f"{jm:.3f}" if jm is not None else "n/a"
+        tag = " [abst]" if v.get("unanswerable") else ""
+        print(f"    cat={cat:<3}{tag:<7} judge_acc={ja_s}  mean_float={jm_s}  "
+              f"f1={v['avg_f1']:.3f}  em={v['avg_em']:.3f}  n={v['count']}")
 
     if args.save:
         path = save_results("locomo", results)
