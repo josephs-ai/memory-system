@@ -763,6 +763,20 @@ def retrieve(
         limit=limit,
         source_agent_prefix=source_agent_prefix,
     )
+    # Normalize the ranking key: hybrid_search_memory_items returns rows keyed by
+    # SQL columns (final_score / vector_score) with NO "score" key. Every
+    # downstream consumer (_merge_ranked_items, _expand_parent_evidence, temporal
+    # reorder) reads row.get("score") and falls back to 0.0 when absent — which
+    # silently flattens ALL scores to ~0 and destroys ranking. Backfill "score"
+    # from the best available signal so the fallback path ranks correctly too.
+    for _r in results:
+        if _r.get("score") is None:
+            _r["score"] = float(
+                _r.get("rerank_score")
+                or _r.get("final_score")
+                or _r.get("vector_score")
+                or 0.0
+            )
     latency = time.perf_counter() - t0
     return results, latency
 

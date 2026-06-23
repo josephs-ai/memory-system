@@ -282,6 +282,24 @@ def run_locomo(
     if force_download:
         download_dataset(force=True)
 
+    # Pre-run sweep: purge ANY stale benchmark_locomo items from prior runs that
+    # crashed/timed-out before reaching their per-run cleanup. Without this, the
+    # index accumulates duplicate conversation copies across runs; the global
+    # top-K candidate fetch then gets dominated by other runs' copies and the
+    # per-run prefix filter starves the candidate set (correct evidence is
+    # retrieved by raw search but never survives into the reader's context).
+    # Gated by do_cleanup so --no-cleanup preserves a fully manual workflow.
+    if do_cleanup:
+        try:
+            swept = cleanup_benchmark_items(SOURCE_AGENT_PREFIX)
+            if swept:
+                LOGGER.warning(
+                    "Pre-run sweep removed %d stale %s items from prior runs",
+                    swept, SOURCE_AGENT_PREFIX,
+                )
+        except Exception as e:
+            LOGGER.warning("Pre-run sweep failed (continuing): %s", e)
+
     data = load_dataset(max_convs=max_convs)
     LOGGER.info("Evaluating %d conversations (judge=%s, judge_model=%s)",
                 len(data), use_judge, judge_model if use_judge else "off")
