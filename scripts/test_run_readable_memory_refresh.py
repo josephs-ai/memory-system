@@ -239,6 +239,51 @@ def test_lock_stale_is_stolen(tmp_path, monkeypatch):
     assert len(calls) == 5  # proceeded
 
 
+def test_gate_value0_stale_phrasings_stay_degraded(tmp_path):
+    """Precise value==0 guard: assorted STALE phrasings with value 0 -> DEGRADED,
+    never a false FAIL (pins the _STALE_TOKENS tightening, replacing the broad
+    'fresh' substring)."""
+    for detail in ("6 digest node(s) but none fresh",
+                   "dashboard stale (generated 2026-06-20T...)",
+                   "card index stale (13 records, generated ...)",
+                   "no fresh digest in window (newest 2026-06-19...)"):
+        probe = lambda d=detail: _health_with({"digest_fresh":
+                                               {"status": "warn", "detail": d, "value": 0}})
+        s = rr.run_refresh(log_dir=tmp_path / detail[:6], runner=ok_runner([]),
+                           health_probe=probe, lock=False)
+        v = s["gate"]["per_artifact"]["digest_fresh"]["verdict"]
+        assert v == "degraded", f"{detail!r} -> {v}, expected degraded"
+
+
+def test_gate_value0_missing_token_still_fails(tmp_path):
+    """A value==0 with an explicit MISSING token (no stale phrase) still -> FAIL."""
+    probe = lambda: _health_with({"digest_fresh":
+                                  {"status": "warn", "detail": "no digest nodes yet", "value": 0}})
+    s = rr.run_refresh(log_dir=tmp_path, runner=ok_runner([]), health_probe=probe, lock=False)
+    assert s["gate"]["per_artifact"]["digest_fresh"]["verdict"] == "fail"
+
+
+def test_word_refreshed_not_treated_as_stale_when_missing(tmp_path):
+    """Regression for the old broad 'fresh' substring: a missing artifact whose
+    detail merely contains 'refreshed' + value 0 + explicit token -> still FAIL."""
+    probe = lambda: _health_with({"card_search_ready":
+                                  {"status": "warn",
+                                   "detail": "card index missing (never refreshed), 0 records",
+                                   "value": 0}})
+    s = rr.run_refresh(log_dir=tmp_path, runner=ok_runner([]), health_probe=probe, lock=False)
+    assert s["gate"]["per_artifact"]["card_search_ready"]["verdict"] == "fail"
+
+
+def test_atomic_exclusive_create_only_one_winner(tmp_path, monkeypatch):
+    """Two fresh acquire_lock calls on the same path: exactly one wins (atomic
+    O_EXCL create), the other is reported held -> no double-acquire race."""
+    lock = tmp_path / ".lock"
+    a, _ = rr.acquire_lock(lock, stale_minutes=30, force=False)
+    b, note_b = rr.acquire_lock(lock, stale_minutes=30, force=False)
+    assert a is True and b is False
+    assert "held by pid" in note_b
+
+
 def test_force_steals_lock(tmp_path, monkeypatch):
     lock = tmp_path / ".lock"
     monkeypatch.setattr(rr, "LOCKFILE", lock)

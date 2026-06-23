@@ -76,6 +76,12 @@ GATE_CHECKS = {
 _MISSING_TOKENS = ("no digest nodes yet", "no agent card", "no boot pack",
                    "missing", "card index missing", "dashboard missing",
                    "index empty", "0 records", "(0 ", "none yet")
+# Tokens that mean STALE (artifact present, just old). Used to make the value==0
+# fallback PRECISE: a value==0 only counts as "missing" when the detail is NOT a
+# known staleness phrase. This avoids the broad `"fresh" not in detail` substring,
+# which would also match unrelated words like "refreshed". The only real value==0
+# stale case today is digest "none fresh"; the rest carry an explicit count>0.
+_STALE_TOKENS = ("none fresh", "stale", "generated ", "newest ", "no fresh")
 
 
 @dataclass
@@ -140,37 +146,67 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _lock_payload() -> str:
+    return json.dumps({"pid": os.getpid(),
+                       "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+
+
+def _try_exclusive_create(lock_path: Path) -> bool:
+    """Atomically create the lockfile iff it does not exist (O_CREAT|O_EXCL).
+
+    This is the race-free fast path: two concurrent racers can't both win the
+    create, eliminating the check-then-write TOCTOU on the common (no prior lock)
+    path. Returns True if WE created it, False if it already existed."""
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, _lock_payload().encode("utf-8"))
+    finally:
+        os.close(fd)
+    return True
+
+
 def acquire_lock(lock_path: Path, *, stale_minutes: int, force: bool) -> tuple[bool, str]:
     """Try to acquire the advisory lock. Returns (acquired, note).
 
-    Steals the lock if --force, or if the holder PID is dead, or if the lock is
-    older than stale_minutes (guards against a crash wedging all future runs)."""
+    Fast path is an atomic exclusive create (race-free). If the lock already exists,
+    steal it only if --force, the holder PID is dead, or it's older than
+    stale_minutes (guards against a crash wedging all future runs). The steal path
+    remains a non-atomic advisory best-effort, which is acceptable per the plan."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if _try_exclusive_create(lock_path):
+        return True, ""
+
+    # Lock already present: decide whether to steal it.
     note = ""
-    if lock_path.exists():
-        steal = force
-        if force:
-            note = "forced lock steal"
-        try:
-            info = json.loads(lock_path.read_text(encoding="utf-8"))
-            holder_pid = int(info.get("pid", -1))
-        except Exception:  # noqa: BLE001
-            holder_pid = -1
+    steal = force
+    if force:
+        note = "forced lock steal"
+    try:
+        info = json.loads(lock_path.read_text(encoding="utf-8"))
+        holder_pid = int(info.get("pid", -1))
+    except Exception:  # noqa: BLE001
+        holder_pid = -1
+    try:
         age_min = (time.time() - lock_path.stat().st_mtime) / 60.0
-        if not steal and holder_pid > 0 and not _pid_alive(holder_pid):
-            steal, note = True, f"stale lock stolen: holder pid {holder_pid} dead"
-        if not steal and age_min > stale_minutes:
-            steal, note = True, f"stale lock stolen: age {age_min:.1f}m > {stale_minutes}m"
-        if not steal:
-            return False, f"lock held by pid {holder_pid} (age {age_min:.1f}m)"
-    _write_lock(lock_path)
+    except OSError:
+        # vanished between create-attempt and stat: retry the atomic create once
+        return (True, "") if _try_exclusive_create(lock_path) else \
+            (False, "lock contended")
+    if not steal and holder_pid > 0 and not _pid_alive(holder_pid):
+        steal, note = True, f"stale lock stolen: holder pid {holder_pid} dead"
+    if not steal and age_min > stale_minutes:
+        steal, note = True, f"stale lock stolen: age {age_min:.1f}m > {stale_minutes}m"
+    if not steal:
+        return False, f"lock held by pid {holder_pid} (age {age_min:.1f}m)"
+    _write_lock(lock_path)  # overwrite with our ownership
     return True, note
 
 
 def _write_lock(lock_path: Path) -> None:
-    lock_path.write_text(json.dumps({"pid": os.getpid(),
-                                     "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
-                         encoding="utf-8")
+    lock_path.write_text(_lock_payload(), encoding="utf-8")
 
 
 def release_lock(lock_path: Path) -> None:
@@ -192,8 +228,9 @@ def _is_missing(detail: str, value) -> bool:
         return True
     # value==0 means empty for the count-based checks; but for digest_fresh value==0
     # is shared by stale ("none fresh"), so only treat value==0 as missing when the
-    # detail does NOT indicate staleness.
-    if value == 0 and "none fresh" not in d and "fresh" not in d:
+    # detail does NOT match a known staleness phrase (precise, not a broad "fresh"
+    # substring that would also catch "refreshed").
+    if value == 0 and not any(tok in d for tok in _STALE_TOKENS):
         return True
     return False
 
