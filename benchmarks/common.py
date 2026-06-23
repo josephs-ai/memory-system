@@ -1232,9 +1232,23 @@ def _retrieve_full_pipeline(
     def sigmoid(x):
         return 1.0 / (1.0 + math.exp(-float(x)))
 
-    # Build MetadataFilter if any filters are specified
+    # Build MetadataFilter if any filters are specified.
+    #
+    # CRITICAL: push source_agent_prefix into the SQL filter too. Each benchmark
+    # run uses a UNIQUE full source_agent (e.g. "benchmark_locomo_conv-30_ab12cd"),
+    # so MetadataFilter.source_agent (exact match) scopes the candidate fetch to
+    # THIS run inside SQL — BEFORE the LIMIT. Previously the prefix was applied
+    # only as a POST-filter on a global top-50, so a single conversation's items
+    # (which never crack the global top-50 once the DB holds other agents' data)
+    # were fetched 0 times and the correct evidence vanished. This was the root
+    # cause of temporal "retrieval_empty" misses (e.g. "When was Jon in Paris?":
+    # the dated turn exists + raw search finds it, but the type-filtered lane
+    # returned nothing). Verified: limit=50 -> 0 run rows; limit=200 -> Paris found.
     metadata_filter = None
-    has_filters = any(f is not None for f in [entity_filter, session_filter, memory_type_filter])
+    has_filters = any(
+        f is not None
+        for f in [entity_filter, session_filter, memory_type_filter, source_agent_prefix]
+    )
     if has_filters:
         try:
             from search_memory_service import MetadataFilter, _apply_metadata_filter
@@ -1242,6 +1256,7 @@ def _retrieve_full_pipeline(
                 entity=entity_filter,
                 session_id=session_filter,
                 memory_type=memory_type_filter,
+                source_agent=source_agent_prefix,
             )
         except ImportError:
             LOGGER.warning("search_memory_service not importable, skipping metadata filters")
