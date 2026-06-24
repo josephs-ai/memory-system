@@ -1043,6 +1043,66 @@ def _extract_entity_subqueries(question: str) -> list[str]:
     return subs if len(subs) >= 2 else []
 
 
+def _extract_entities(question: str) -> list[str]:
+    """Return distinct proper-noun-ish entity candidates in a question."""
+    entities: list[str] = []
+    for m in _CAPWORD.finditer(question or ""):
+        tok = m.group(1)
+        if tok in _STOP_CAPS or tok in entities:
+            continue
+        entities.append(tok)
+    return entities
+
+
+def _entity_anchor_probes(question: str) -> list[str]:
+    """Build entity-anchored recall probes for single-entity questions.
+
+    Many cat-1 ("multi-hop") LoCoMo questions are single-entity but require
+    pulling *all* of one person's facts, then reasoning across them — e.g.
+    "Where did Caroline move from 4 years ago?", "What career path has Caroline
+    decided to pursue?". A single dense query for the full sentence retrieves
+    the literal phrasing poorly. An entity-anchored probe ("Caroline") drags the
+    whole Caroline cluster into the candidate pool so the right turn can rank.
+
+    We emit, per entity, both a bare-entity probe and an entity+predicate probe
+    (entity joined with the salient non-stopword content words of the question),
+    which improves precision without losing recall.
+    """
+    entities = _extract_entities(question)
+    if not entities:
+        return []
+    # Salient content words = lowercase tokens that aren't stopwords/wh-words.
+    # Exclude entity names themselves so the predicate carries only the
+    # *attribute* being asked about (e.g. "move", "career path", "relationship
+    # status") and never another speaker's name.
+    content_stop = {
+        "the", "a", "an", "of", "to", "in", "on", "at", "for", "and", "or",
+        "with", "from", "did", "do", "does", "is", "are", "was", "were", "has",
+        "have", "had", "what", "when", "where", "which", "who", "whose", "why",
+        "how", "both", "their", "they", "them", "about", "into", "that", "this",
+        "ago", "years", "year", "go", "going",
+    }
+    entity_lc = {e.lower() for e in entities}
+    content = [
+        w for w in re.findall(r"[a-z]{3,}", (question or "").lower())
+        if w not in content_stop and w not in entity_lc
+    ]
+    predicate = " ".join(content[:4])
+    probes: list[str] = []
+    for ent in entities:
+        probes.append(ent)
+        if predicate:
+            probes.append(f"{ent} {predicate}")
+    # Dedup preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in probes:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def retrieve_multihop(
     query: str,
     *,
@@ -1080,19 +1140,37 @@ def retrieve_multihop(
     if is_multientity or q_intent in {"multi_hop", "aggregation_count", "open_ended_summary"}:
         subqueries = _extract_entity_subqueries(query)
 
-    if not subqueries:
+    # Entity-anchored recall probes for single-entity questions. The original
+    # multi-entity decomposition only fired on "both A and B"-style phrasing,
+    # leaving the bulk of cat-1/cat-3 (single-entity multi-hop + temporal)
+    # questions with one weak joint-phrasing query. Anchor probes pull the
+    # entity's whole fact cluster into the candidate pool so the right turn can
+    # rank. These fire for fact/temporal/multi-hop intents whenever a named
+    # entity is present — i.e. exactly the categories that were missing evidence.
+    anchor_probes: list[str] = []
+    if q_intent in {
+        "multi_hop", "aggregation_count", "open_ended_summary", "direct_fact",
+        "temporal_when", "temporal_latest", "temporal_earliest", "temporal_range",
+        "preference", "contradiction_or_update", "unknown",
+    }:
+        anchor_probes = _entity_anchor_probes(query)
+
+    if not subqueries and not anchor_probes:
         # No decomposition applicable — base result is the answer. Keep the same
         # 3-tuple contract so callers don't branch.
         return base[:limit], time.perf_counter() - t0, {
             "multihop_fired": False,
             "subqueries": [],
+            "anchor_probes": [],
             "base_n": len(base),
         }
 
-    # Per-entity sub-retrievals. Pull a few extra per sub-query so the merge has
-    # real material to work with, then dedup down to `limit`.
-    sub_limit = max(limit // max(len(subqueries), 1), 4)
+    # Sub-retrievals. Pull a few extra per probe so the merge has real material
+    # to work with, then dedup down to `limit`.
+    probe_count = max(len(subqueries) + len(anchor_probes), 1)
+    sub_limit = max((limit * 2) // probe_count, 5)
     pools: list[tuple[str, float, list[dict]]] = [("base", 1.05, base)]
+    # Multi-entity decomposition probes keep weight 1.0 (co-primary with base).
     for sq in subqueries:
         try:
             rows, _ = retrieve_typed_lanes(
@@ -1102,6 +1180,18 @@ def retrieve_multihop(
             pools.append((f"hop:{sq[:24]}", 1.0, rows))
         except Exception as e:
             LOGGER.warning("Multi-hop sub-query failed (%s): %s", sq, e)
+    # Entity-anchor probes are recall wideners: slightly lower weight so they
+    # broaden the candidate pool without hijacking the final ranking away from
+    # the precise query/decomposition matches.
+    for ap in anchor_probes:
+        try:
+            rows, _ = retrieve_typed_lanes(
+                ap, limit=sub_limit, source_agent_prefix=source_agent_prefix,
+                use_full_pipeline=use_full_pipeline, expand_parents=expand_parents,
+            )
+            pools.append((f"anchor:{ap[:24]}", 0.9, rows))
+        except Exception as e:
+            LOGGER.warning("Anchor probe failed (%s): %s", ap, e)
 
     merged = _merge_ranked_items(pools, limit=max(limit * 3, limit + 10))
     merged = _apply_relative_temporal_order(merged, q_intent)
@@ -1109,6 +1199,7 @@ def retrieve_multihop(
     return merged, time.perf_counter() - t0, {
         "multihop_fired": True,
         "subqueries": subqueries,
+        "anchor_probes": anchor_probes,
         "base_n": len(base),
         "merged_n": len(merged),
     }
@@ -1232,6 +1323,16 @@ def _retrieve_full_pipeline(
     def sigmoid(x):
         return 1.0 / (1.0 + math.exp(-float(x)))
 
+    # Candidate pool depth. The per-run source_agent filter scopes the DB to ONE
+    # conversation's items, but the DB holds many runs' rows. A fixed pool of 50
+    # was empirically too shallow: deeper evidence (multi-hop chains, dated
+    # temporal turns) never entered the pool, then reranking/limiting could not
+    # recover it (limit=50 -> 0 run rows; limit=200 -> evidence found; see prior
+    # Paris regression). Scale the pool with the requested limit and floor it
+    # high enough that cat-1/cat-3 evidence reliably enters before reranking.
+    sql_pool = max(200, limit * 20)
+    qdrant_pool = max(80, limit * 8)
+
     # Build MetadataFilter if any filters are specified.
     #
     # CRITICAL: push source_agent_prefix into the SQL filter too. Each benchmark
@@ -1270,7 +1371,7 @@ def _retrieve_full_pipeline(
                 query,
                 filters=metadata_filter,
                 status="active",
-                limit=50,
+                limit=sql_pool,
                 query_embedding=qvec.tolist(),
             )
         except Exception as e:
@@ -1278,7 +1379,7 @@ def _retrieve_full_pipeline(
             canonical_items = hybrid_search_memory_items(
                 qvec, query_text=query, status="active",
                 allowed_sensitivities=["public", "internal"],
-                limit=50, source_agent_prefix=source_agent_prefix,
+                limit=sql_pool, source_agent_prefix=source_agent_prefix,
             )
             try:
                 from search_memory_service import _apply_metadata_filter
@@ -1294,7 +1395,7 @@ def _retrieve_full_pipeline(
                 query,
                 filters=None,
                 status="active",
-                limit=50,
+                limit=sql_pool,
                 query_embedding=qvec.tolist(),
             )
             # Post-filter by source_agent_prefix if set
@@ -1307,7 +1408,7 @@ def _retrieve_full_pipeline(
             canonical_items = hybrid_search_memory_items(
                 qvec, query_text=query, status="active",
                 allowed_sensitivities=["public", "internal"],
-                limit=50, source_agent_prefix=source_agent_prefix,
+                limit=sql_pool, source_agent_prefix=source_agent_prefix,
             )
 
     scored = []
@@ -1342,7 +1443,7 @@ def _retrieve_full_pipeline(
     # Step 2: Qdrant vector search (supplementary) + post-retrieval metadata filter
     try:
         from vector_store_qdrant import search_memory_vectors
-        qdrant_hits = search_memory_vectors(qvec, limit=20)
+        qdrant_hits = search_memory_vectors(qvec, limit=qdrant_pool)
         qdrant_rows = []
         for hit in qdrant_hits:
             payload = hit.payload or {}
