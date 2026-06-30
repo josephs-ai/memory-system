@@ -36,6 +36,18 @@ ROUTE_SCRIPT = SCRIPTS_DIR / "route_memory_items_batch.py"
 PROCESS_AUTO_SCRIPT = SCRIPTS_DIR / "process_auto_memory_items.py"
 MAINTENANCE_CYCLE_SCRIPT = SCRIPTS_DIR / "run_memory_maintenance_cycle.py"
 
+# Raw archive directory — dehydrated transcripts are copied here immediately
+# after dehydration, BEFORE the slow extraction/routing steps. This ensures
+# transcript content survives even if extraction crashes, times out, or is
+# skipped due to oversize limits.
+ARCHIVE_DIR = DEHYDRATED_DIR / "archives"
+ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Transcripts larger than this (in bytes) will be dehydrated and archived
+# but skip the slow LLM extraction in the normal cycle. They can be
+# reprocessed during quiet-hours maintenance. Default: 2 MB.
+OVERSIZE_THRESHOLD_BYTES = int(os.environ.get("OPENCLAW_OVERSIZE_THRESHOLD_BYTES", str(2 * 1024 * 1024)))
+
 CURSOR_VERSION = "v2-hash-window-4096"
 HASH_WINDOW_BYTES = 4096
 REPLAY_WINDOW_BYTES = 4096
@@ -416,6 +428,51 @@ def checkpoint_transcript(args, transcript: Path) -> None:
         run_delta_dehydration(args.agent, dehydrated_file, transcript, committed_offset)
     else:
         run_full_dehydration(args.agent, dehydrated_file, transcript)
+
+    # ── Raw archival safety net ───────────────────────────────────────
+    # Copy the dehydrated content to a timestamped archive BEFORE the slow
+    # extraction/routing steps. This guarantees the transcript content is
+    # preserved even if downstream processing crashes, times out, or is
+    # skipped due to oversize limits.
+    is_rotated = ".jsonl.reset." in transcript.name or ".jsonl.deleted." in transcript.name
+    if is_rotated and dehydrated_file.exists():
+        ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        archive_name = f"{args.agent}.{transcript.stem}.{ts}.txt"
+        archive_path = ARCHIVE_DIR / archive_name
+        try:
+            shutil.copy2(str(dehydrated_file), str(archive_path))
+            print(f"[ARCHIVE] Raw dehydrated content archived to: {archive_path.name}")
+        except Exception as e:
+            print(f"[ARCHIVE] WARNING: failed to archive dehydrated content: {e}")
+
+    # ── Oversize guard ────────────────────────────────────────────────
+    # Transcripts larger than OVERSIZE_THRESHOLD_BYTES are dehydrated and
+    # archived (above) but skip the slow LLM extraction. The cursor is
+    # still advanced so the file isn't retried every cycle. These can be
+    # reprocessed during quiet-hours maintenance with --reprocess-archives.
+    transcript_bytes = current_stat["size"]
+    if transcript_bytes > OVERSIZE_THRESHOLD_BYTES:
+        print(f"[OVERSIZE] Transcript is {transcript_bytes / (1024*1024):.1f} MB"
+              f" (threshold={OVERSIZE_THRESHOLD_BYTES / (1024*1024):.1f} MB)"
+              f" — skipping LLM extraction, advancing cursor.")
+        try:
+            new_cursor = build_cursor(transcript, processed_offset=current_stat["size"])
+        except FileNotFoundError:
+            new_cursor = {
+                "cursor_version": CURSOR_VERSION,
+                "path": str(transcript),
+                "inode": current_stat.get("inode", 0),
+                "device": current_stat.get("device", 0),
+                "size": current_stat["size"],
+                "head_hash": current_stat.get("head_hash", ""),
+                "tail_hash": current_stat.get("tail_hash", ""),
+                "committed_offset": current_stat["size"],
+                "processed_offset": current_stat["size"],
+                "note": "oversize-archive-only",
+            }
+        save_cursor(args.agent, new_cursor, transcript)
+        print(f"[S1] Cursor saved (oversize): committed_offset={new_cursor['committed_offset']}")
+        return
 
     # S4: delta-aware chunking — only chunk new bytes when possible
     chunk_cmd = [

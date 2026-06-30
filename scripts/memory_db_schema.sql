@@ -73,6 +73,19 @@ CREATE TABLE IF NOT EXISTS memory_discarded (
     discarded_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Keep rejection re-entry checks indexed. The batch router probes prior
+-- discards server-side instead of loading the full table into Python.
+CREATE INDEX IF NOT EXISTS idx_discarded_text_hash
+    ON memory_discarded USING hash (md5(lower(payload->>'text')));
+CREATE INDEX IF NOT EXISTS idx_discarded_epv
+    ON memory_discarded ((payload->>'entity'), (payload->>'property'), (payload->>'value'))
+    WHERE payload->>'entity' IS NOT NULL
+      AND payload->>'property' IS NOT NULL
+      AND payload->>'value' IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_discarded_at
+    ON memory_discarded (discarded_at)
+    WHERE discarded_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS retrieval_feedback (
     feedback_id BIGSERIAL PRIMARY KEY,
     selected_id TEXT,

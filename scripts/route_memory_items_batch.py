@@ -30,6 +30,8 @@ from memory_db import (
     upsert_memory_item,
     upsert_memory_items,
     fetch_discarded_payloads,
+    check_rejected_texts_sql,
+    check_rejected_slots_sql,
     close_pool,
     POOL,
 )
@@ -239,9 +241,13 @@ def apply_agent_policy(item: dict) -> tuple[str, str]:
     }
     explicit_approval = bool(item.get("approved_by") or item.get("approval_source"))
 
-    if confidence >= min_auto and (
-        explicit_authority and (explicit_approval or authority_basis == "system_tool_verified")
-    ):
+    # For user_explicit authority, the user's own statement IS the approval.
+    # The structural extraction pipeline cannot populate approved_by (no human
+    # review step), so requiring it blocks ALL automated memory ingestion.
+    # system_tool_verified is similarly self-approving.
+    self_approving = authority_basis in {"user_explicit", "system_tool_verified"}
+
+    if confidence >= min_auto and explicit_authority and (explicit_approval or self_approving):
         return "AUTO", "agent_policy_auto"
 
     if confidence >= min_inbox:
@@ -363,13 +369,33 @@ def main():
     all_ids = [item.get("id") for item in items if item.get("id")]
     existing_ids = bulk_fetch_existing_ids(all_ids)
 
-    # --- Phase 3: Prefetch discarded payloads once, build fast lookup ---
-    # Windowed by recency: only rejections inside REJECT_WINDOW_DAYS suppress
-    # re-entry. Old discards age out so reclaimed/again-relevant memory can flow.
+    # --- Phase 3: SQL-side batch rejection check ---
+    # Instead of loading 1M+ discarded rows into Python (6GB+ RAM, minutes of
+    # processing), we check all candidate texts and slots against the discarded
+    # table in SQL using indexed queries. Returns only matches with their max
+    # prior confidence for the confidence-override-margin check.
     within = REJECT_WINDOW_DAYS if REJECT_WINDOW_DAYS > 0 else None
-    discarded_payloads = fetch_discarded_payloads(within_days=within)
-    rejected_text_set, rejected_slot_set = build_rejected_index(discarded_payloads)
-    del discarded_payloads  # free memory
+
+    # Collect candidate texts and slots for batch SQL lookup
+    if within is not None and within > 0:
+        candidate_texts = []
+        candidate_slots = []
+        for item in items:
+            text = (item.get("text") or "").strip().lower()
+            if text:
+                candidate_texts.append(text)
+            e, p, v = item.get("entity"), item.get("property"), item.get("value")
+            if e and p and v:
+                candidate_slots.append((e, p, v))
+
+        # One SQL round-trip each — indexed, returns only matches
+        rejected_text_map = check_rejected_texts_sql(candidate_texts, within_days=within)
+        rejected_slot_map = check_rejected_slots_sql(candidate_slots, within_days=within)
+    else:
+        # Rejection gate disabled (REJECT_WINDOW_DAYS=0) — skip SQL entirely.
+        # fast_candidate_matches_rejected() will return False immediately anyway.
+        rejected_text_map = {}
+        rejected_slot_map = {}
 
     # --- Phase 4: Classify each item (no DB writes yet) ---
     log_buf: list[str] = []
@@ -398,8 +424,8 @@ def main():
             any_output = True
             continue
 
-        # Rejected match against prebuilt index
-        if fast_candidate_matches_rejected(item, rejected_text_set, rejected_slot_set):
+        # Rejected match against SQL-fetched rejection maps
+        if fast_candidate_matches_rejected(item, rejected_text_map, rejected_slot_map):
             discarded_items.append(item)
             if item_id:
                 seen_batch_ids.add(item_id)

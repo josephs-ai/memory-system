@@ -73,6 +73,15 @@ def test_window_disabled_never_suppresses(monkeypatch):
     assert R.fast_candidate_matches_rejected({"text": "x likes y", "confidence": 0.0}, tm, sm) is False
 
 
+
+def test_sql_rejection_queries_preserve_missing_confidence_non_override():
+    import inspect
+    import memory_db as M
+    text_sql = inspect.getsource(M.check_rejected_texts_sql)
+    slot_sql = inspect.getsource(M.check_rejected_slots_sql)
+    assert "bool_or(NOT (d.payload ? 'confidence')" in text_sql
+    assert "bool_or(NOT (d.payload ? 'confidence')" in slot_sql
+
 def test_id_dedup_excludes_discarded():
     # The id-dedup SQL must not reference memory_discarded; discards are handled
     # by the rejection gate, not the hard id skip.

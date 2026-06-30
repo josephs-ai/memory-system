@@ -682,6 +682,143 @@ def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:
             return True, old
 
     return False, None
+
+
+# ---------------------------------------------------------------------------
+# SQL-side batch rejection check (Phase 1 performance fix)
+# ---------------------------------------------------------------------------
+# Replaces the pattern of loading 1M+ discarded rows into Python.
+# Uses idx_discarded_text_hash (md5 hash index) and idx_discarded_epv
+# (entity/property/value btree) for indexed lookups on the DB side.
+# Returns only matching candidates with their max prior confidence,
+# preserving the confidence-override-margin semantics.
+# ---------------------------------------------------------------------------
+
+def check_rejected_texts_sql(
+    texts: list[str],
+    within_days: int | None = 30,
+) -> dict[str, float | None]:
+    """Check which candidate texts match prior discards, server-side.
+
+    Returns {lowercase_text: max_prior_confidence} for texts that have a
+    matching discard within the recency window. Confidence is None when the
+    discard had no stored confidence (non-overridable).
+
+    Uses idx_discarded_text_hash (HASH on md5(lower(payload->>'text'))).
+    """
+    if not texts:
+        return {}
+
+    # Deduplicate and normalize
+    unique_texts = list({t.strip().lower() for t in texts if t and t.strip()})
+    if not unique_texts:
+        return {}
+
+    recency_clause = ""
+    params: list = [unique_texts]
+    if within_days is not None and within_days > 0:
+        recency_clause = "AND (d.discarded_at IS NULL OR d.discarded_at > now() - make_interval(days => %s))"
+        params.append(within_days)
+
+    # md5-hash match uses idx_discarded_text_hash; unnest keeps it to one
+    # round-trip regardless of candidate count.
+    sql = f"""
+        WITH candidates AS (
+            SELECT unnest(%s::text[]) AS txt
+        )
+        SELECT c.txt,
+               CASE
+                 WHEN bool_or(NOT (d.payload ? 'confidence') OR d.payload->>'confidence' IS NULL)
+                 THEN NULL
+                 ELSE max(
+                   CASE
+                     WHEN d.payload->>'confidence' ~ '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$'
+                     THEN (d.payload->>'confidence')::float
+                     ELSE NULL
+                   END
+                 )
+               END AS max_prior_conf
+        FROM candidates c
+        JOIN memory_discarded d
+          ON md5(lower(d.payload->>'text')) = md5(c.txt)
+         AND lower(d.payload->>'text') = c.txt
+        {recency_clause}
+        GROUP BY c.txt
+    """
+
+    result: dict[str, float | None] = {}
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            for txt, max_conf in cur.fetchall():
+                result[txt] = max_conf  # None if all discards lacked confidence
+    return result
+
+
+def check_rejected_slots_sql(
+    slots: list[tuple[str, str, str]],
+    within_days: int | None = 30,
+) -> dict[tuple[str, str, str], float | None]:
+    """Check which (entity, property, value) triples match prior discards.
+
+    Returns {(entity, property, value): max_prior_confidence} for slots
+    that have a matching discard within the recency window.
+
+    Uses idx_discarded_epv btree index.
+    """
+    if not slots:
+        return {}
+
+    # Deduplicate
+    unique_slots = list({(e, p, v) for e, p, v in slots if e and p and v})
+    if not unique_slots:
+        return {}
+
+    entities = [s[0] for s in unique_slots]
+    properties = [s[1] for s in unique_slots]
+    values = [s[2] for s in unique_slots]
+
+    recency_clause = ""
+    params: list = [entities, properties, values]
+    if within_days is not None and within_days > 0:
+        recency_clause = "AND (d.discarded_at IS NULL OR d.discarded_at > now() - make_interval(days => %s))"
+        params.append(within_days)
+
+    sql = f"""
+        WITH candidate_slots AS (
+            SELECT * FROM unnest(%s::text[], %s::text[], %s::text[])
+                AS t(entity, property, value)
+        )
+        SELECT cs.entity, cs.property, cs.value,
+               CASE
+                 WHEN bool_or(NOT (d.payload ? 'confidence') OR d.payload->>'confidence' IS NULL)
+                 THEN NULL
+                 ELSE max(
+                   CASE
+                     WHEN d.payload->>'confidence' ~ '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$'
+                     THEN (d.payload->>'confidence')::float
+                     ELSE NULL
+                   END
+                 )
+               END AS max_prior_conf
+        FROM candidate_slots cs
+        JOIN memory_discarded d
+          ON d.payload->>'entity' = cs.entity
+         AND d.payload->>'property' = cs.property
+         AND d.payload->>'value' = cs.value
+        {recency_clause}
+        GROUP BY cs.entity, cs.property, cs.value
+    """
+
+    result: dict[tuple[str, str, str], float | None] = {}
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            for e, p, v, max_conf in cur.fetchall():
+                result[(e, p, v)] = max_conf
+    return result
+
+
 def low_utility_feedback_rows(min_bad: int = 1):
     with POOL.connection() as conn:
         with conn.cursor() as cur:
@@ -878,11 +1015,24 @@ def upsert_memory_embeddings_batch(
         conn.commit()
 
 
-def fetch_memory_items_for_embedding(status: str = "active"):
+def fetch_memory_items_for_embedding(status: str = "active", model_name: str | None = None):
     with POOL.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            embedding_filter = ""
+            params: tuple = (status,)
+            if model_name:
+                embedding_filter = """
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM memory_item_embeddings e
+                        WHERE e.memory_id = memory_items.id
+                          AND e.model_name = %s
+                  )
                 """
+                params = (status, model_name)
+
+            cur.execute(
+                f"""
                 SELECT
                     id,
                     text,
@@ -912,9 +1062,10 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     created_at
                 FROM memory_items
                 WHERE status = %s
+                {embedding_filter}
                 ORDER BY id
                 """,
-                (status,),
+                params,
             )
 
             rows = cur.fetchall()
