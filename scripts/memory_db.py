@@ -10,7 +10,14 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
-DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
+# Resolve DSN via the single canonical resolver so this core data layer honors
+# BOTH env var names (OPENCLAW_MEMORY_DSN and OPENCLAW_MEMORY_DB_DSN) with one
+# shared default — previously this read only OPENCLAW_MEMORY_DB_DSN, diverging
+# from the ~30 scripts that read OPENCLAW_MEMORY_DSN and causing silent
+# identity drift between modules in the same deployment / in CI.
+from config import resolve_db_dsn
+
+DEFAULT_DSN = resolve_db_dsn()
 
 POOL = ConnectionPool(
     conninfo=DEFAULT_DSN,
@@ -618,11 +625,30 @@ def all_feedback_item_ids():
             )
             return [row[0] for row in cur.fetchall()]
 
-def fetch_discarded_payloads():
+def fetch_discarded_payloads(within_days: int | None = None):
+    """Fetch discarded payloads for the rejection-match gate.
+
+    Historically this returned the ENTIRE memory_discarded table (500k+ rows),
+    which (a) made every routing pass O(table) and (b) turned every past
+    rejection into a permanent ban: once a claim was discarded, any future
+    re-extraction matched and was suppressed forever, even with more context
+    or higher confidence. We now window by recency so rejections age out and
+    a claim can re-enter the pipeline after the window. Pass within_days=None
+    to restore the legacy "all rows" behavior.
+    """
     with POOL.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT payload FROM memory_discarded")
-            return [row[0] for row in cur.fetchall()]
+            if within_days is None:
+                cur.execute("SELECT payload, discarded_at FROM memory_discarded")
+            else:
+                cur.execute(
+                    "SELECT payload, discarded_at FROM memory_discarded "
+                    "WHERE discarded_at IS NULL OR discarded_at > now() - make_interval(days => %s)",
+                    (within_days,),
+                )
+            # Recency windowing is applied in SQL above; the matcher only needs
+            # the payload (text/slot/confidence), so we discard discarded_at here.
+            return [payload for payload, _discarded_at in cur.fetchall()]
 
 
 def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:
@@ -656,6 +682,143 @@ def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:
             return True, old
 
     return False, None
+
+
+# ---------------------------------------------------------------------------
+# SQL-side batch rejection check (Phase 1 performance fix)
+# ---------------------------------------------------------------------------
+# Replaces the pattern of loading 1M+ discarded rows into Python.
+# Uses idx_discarded_text_hash (md5 hash index) and idx_discarded_epv
+# (entity/property/value btree) for indexed lookups on the DB side.
+# Returns only matching candidates with their max prior confidence,
+# preserving the confidence-override-margin semantics.
+# ---------------------------------------------------------------------------
+
+def check_rejected_texts_sql(
+    texts: list[str],
+    within_days: int | None = 30,
+) -> dict[str, float | None]:
+    """Check which candidate texts match prior discards, server-side.
+
+    Returns {lowercase_text: max_prior_confidence} for texts that have a
+    matching discard within the recency window. Confidence is None when the
+    discard had no stored confidence (non-overridable).
+
+    Uses idx_discarded_text_hash (HASH on md5(lower(payload->>'text'))).
+    """
+    if not texts:
+        return {}
+
+    # Deduplicate and normalize
+    unique_texts = list({t.strip().lower() for t in texts if t and t.strip()})
+    if not unique_texts:
+        return {}
+
+    recency_clause = ""
+    params: list = [unique_texts]
+    if within_days is not None and within_days > 0:
+        recency_clause = "AND (d.discarded_at IS NULL OR d.discarded_at > now() - make_interval(days => %s))"
+        params.append(within_days)
+
+    # md5-hash match uses idx_discarded_text_hash; unnest keeps it to one
+    # round-trip regardless of candidate count.
+    sql = f"""
+        WITH candidates AS (
+            SELECT unnest(%s::text[]) AS txt
+        )
+        SELECT c.txt,
+               CASE
+                 WHEN bool_or(NOT (d.payload ? 'confidence') OR d.payload->>'confidence' IS NULL)
+                 THEN NULL
+                 ELSE max(
+                   CASE
+                     WHEN d.payload->>'confidence' ~ '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$'
+                     THEN (d.payload->>'confidence')::float
+                     ELSE NULL
+                   END
+                 )
+               END AS max_prior_conf
+        FROM candidates c
+        JOIN memory_discarded d
+          ON md5(lower(d.payload->>'text')) = md5(c.txt)
+         AND lower(d.payload->>'text') = c.txt
+        {recency_clause}
+        GROUP BY c.txt
+    """
+
+    result: dict[str, float | None] = {}
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            for txt, max_conf in cur.fetchall():
+                result[txt] = max_conf  # None if all discards lacked confidence
+    return result
+
+
+def check_rejected_slots_sql(
+    slots: list[tuple[str, str, str]],
+    within_days: int | None = 30,
+) -> dict[tuple[str, str, str], float | None]:
+    """Check which (entity, property, value) triples match prior discards.
+
+    Returns {(entity, property, value): max_prior_confidence} for slots
+    that have a matching discard within the recency window.
+
+    Uses idx_discarded_epv btree index.
+    """
+    if not slots:
+        return {}
+
+    # Deduplicate
+    unique_slots = list({(e, p, v) for e, p, v in slots if e and p and v})
+    if not unique_slots:
+        return {}
+
+    entities = [s[0] for s in unique_slots]
+    properties = [s[1] for s in unique_slots]
+    values = [s[2] for s in unique_slots]
+
+    recency_clause = ""
+    params: list = [entities, properties, values]
+    if within_days is not None and within_days > 0:
+        recency_clause = "AND (d.discarded_at IS NULL OR d.discarded_at > now() - make_interval(days => %s))"
+        params.append(within_days)
+
+    sql = f"""
+        WITH candidate_slots AS (
+            SELECT * FROM unnest(%s::text[], %s::text[], %s::text[])
+                AS t(entity, property, value)
+        )
+        SELECT cs.entity, cs.property, cs.value,
+               CASE
+                 WHEN bool_or(NOT (d.payload ? 'confidence') OR d.payload->>'confidence' IS NULL)
+                 THEN NULL
+                 ELSE max(
+                   CASE
+                     WHEN d.payload->>'confidence' ~ '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$'
+                     THEN (d.payload->>'confidence')::float
+                     ELSE NULL
+                   END
+                 )
+               END AS max_prior_conf
+        FROM candidate_slots cs
+        JOIN memory_discarded d
+          ON d.payload->>'entity' = cs.entity
+         AND d.payload->>'property' = cs.property
+         AND d.payload->>'value' = cs.value
+        {recency_clause}
+        GROUP BY cs.entity, cs.property, cs.value
+    """
+
+    result: dict[tuple[str, str, str], float | None] = {}
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            for e, p, v, max_conf in cur.fetchall():
+                result[(e, p, v)] = max_conf
+    return result
+
+
 def low_utility_feedback_rows(min_bad: int = 1):
     with POOL.connection() as conn:
         with conn.cursor() as cur:
@@ -829,11 +992,47 @@ def upsert_memory_embedding(memory_id: str, model_name: str, embedding: list[flo
         conn.commit()
 
 
-def fetch_memory_items_for_embedding(status: str = "active"):
+def upsert_memory_embeddings_batch(
+    items: list[tuple[str, str, list[float]]],
+):
+    """Bulk upsert embeddings. Each tuple is (memory_id, model_name, embedding).
+    Single connection, single commit."""
+    if not items:
+        return
     with POOL.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
+                INSERT INTO memory_item_embeddings (memory_id, model_name, embedding, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (memory_id) DO UPDATE SET
+                    model_name = EXCLUDED.model_name,
+                    embedding = EXCLUDED.embedding,
+                    updated_at = now()
+                """,
+                items,
+            )
+        conn.commit()
+
+
+def fetch_memory_items_for_embedding(status: str = "active", model_name: str | None = None):
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            embedding_filter = ""
+            params: tuple = (status,)
+            if model_name:
+                embedding_filter = """
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM memory_item_embeddings e
+                        WHERE e.memory_id = memory_items.id
+                          AND e.model_name = %s
+                  )
+                """
+                params = (status, model_name)
+
+            cur.execute(
+                f"""
                 SELECT
                     id,
                     text,
@@ -857,12 +1056,16 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     freshness_class,
                     source_agent,
                     source_session,
-                    source_chunk
+                    source_chunk,
+                    last_confirmed,
+                    first_seen,
+                    created_at
                 FROM memory_items
                 WHERE status = %s
+                {embedding_filter}
                 ORDER BY id
                 """,
-                (status,),
+                params,
             )
 
             rows = cur.fetchall()
@@ -891,6 +1094,9 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     "source_agent": row[20],
                     "source_session": row[21],
                     "source_chunk": row[22],
+                    "last_confirmed": row[23],
+                    "first_seen": row[24],
+                    "created_at": row[25],
                 }
                 for row in rows
             ]

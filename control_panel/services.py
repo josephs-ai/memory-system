@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -203,7 +204,24 @@ def memory_search(query: str, top_k: int = 10) -> list[dict]:
 # Code graph (Neo4j + Qdrant)
 # ---------------------------------------------------------------------------
 
+_neo4j_cache: dict[str, Any] = {}
+_neo4j_cache_ts: float = 0.0
+_NEO4J_CACHE_TTL: float = 60.0  # seconds — avoid hammering cypher-shell
+
+
 def neo4j_stats() -> dict[str, Any]:
+    """Get node/relationship counts from Neo4j (cached for 60s)."""
+    global _neo4j_cache, _neo4j_cache_ts
+    now = time.monotonic()
+    if _neo4j_cache and (now - _neo4j_cache_ts) < _NEO4J_CACHE_TTL:
+        return _neo4j_cache
+    result = _neo4j_stats_uncached()
+    _neo4j_cache = result
+    _neo4j_cache_ts = now
+    return result
+
+
+def _neo4j_stats_uncached() -> dict[str, Any]:
     """Get node/relationship counts from Neo4j."""
     try:
         result = subprocess.run(
@@ -247,7 +265,23 @@ def neo4j_stats() -> dict[str, Any]:
         return {"status": "error", "error": str(e), "nodes": {}, "relationships": {}, "total_nodes": 0, "total_relationships": 0}
 
 
+_qdrant_cache: dict[str, Any] = {}
+_qdrant_cache_ts: float = 0.0
+
+
 def qdrant_stats() -> dict[str, Any]:
+    """Get collection info from Qdrant (cached for 60s)."""
+    global _qdrant_cache, _qdrant_cache_ts
+    now = time.monotonic()
+    if _qdrant_cache and (now - _qdrant_cache_ts) < _NEO4J_CACHE_TTL:
+        return _qdrant_cache
+    result = _qdrant_stats_uncached()
+    _qdrant_cache = result
+    _qdrant_cache_ts = now
+    return result
+
+
+def _qdrant_stats_uncached() -> dict[str, Any]:
     """Get collection info from Qdrant."""
     try:
         resp = requests.get(f"{QDRANT_URL}/collections", timeout=5)

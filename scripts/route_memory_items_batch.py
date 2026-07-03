@@ -3,10 +3,23 @@ Batch routing of memory items through the routing rules engine.
 Processes multiple candidates in a single pass for efficiency.
 """
 import json
+import os
 import argparse
 from functools import lru_cache
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# --- Re-entry tuning (env-overridable) ---------------------------------------
+# How long a discard suppresses a matching re-extraction. After this window a
+# claim is allowed back into routing so it can be re-evaluated. 0 disables the
+# rejection-match gate entirely.
+REJECT_WINDOW_DAYS = int(os.environ.get("OPENCLAW_REJECT_WINDOW_DAYS", "30"))
+# If a re-extracted item's confidence exceeds the confidence it was discarded
+# with by at least this margin, allow it back in even inside the window — a
+# materially better-supported claim should not stay banned.
+REJECT_CONF_OVERRIDE_MARGIN = float(
+    os.environ.get("OPENCLAW_REJECT_CONF_OVERRIDE_MARGIN", "0.15")
+)
 from memory_promotion_gate import explicit_promotion_gate
 from memory_routing_rules import stable_safe_auto
 
@@ -17,6 +30,8 @@ from memory_db import (
     upsert_memory_item,
     upsert_memory_items,
     fetch_discarded_payloads,
+    check_rejected_texts_sql,
+    check_rejected_slots_sql,
     close_pool,
     POOL,
 )
@@ -68,7 +83,15 @@ def flush_log_buffer(buf: list):
 
 
 def bulk_fetch_existing_ids(item_ids: list[str]) -> set[str]:
-    """Check which IDs already exist in any queue/table, in one query."""
+    """Check which IDs already exist in a LIVE queue/table, in one query.
+
+    Intentionally excludes memory_discarded. candidate_id is a deterministic
+    hash of (chunk|claim_text), so including the discard table here meant any
+    once-discarded claim produced the same id forever and was skipped as a
+    SKIP_DUPLICATE before decide_route ever ran — permanently dropping memory.
+    Discards are handled separately by the confidence/recency-aware rejection
+    gate (fast_candidate_matches_rejected), which can let claims back in.
+    """
     if not item_ids:
         return set()
     with POOL.connection() as conn:
@@ -80,42 +103,84 @@ def bulk_fetch_existing_ids(item_ids: list[str]) -> set[str]:
                     UNION ALL
                     SELECT id FROM memory_inbox WHERE id = ANY(%s)
                     UNION ALL
-                    SELECT id FROM memory_discarded WHERE id = ANY(%s)
-                    UNION ALL
                     SELECT id FROM memory_items WHERE id = ANY(%s)
                 ) AS combined
                 """,
-                (item_ids, item_ids, item_ids, item_ids),
+                (item_ids, item_ids, item_ids),
             )
             return {row[0] for row in cur.fetchall()}
 
 
-def build_rejected_index(discarded_payloads: list[dict]) -> tuple[set[str], set[tuple]]:
-    """Build fast lookup structures from discarded payloads for O(1) matching."""
-    text_set: set[str] = set()
-    slot_set: set[tuple] = set()
+def build_rejected_index(discarded_payloads: list[dict]) -> tuple[dict, dict]:
+    """Build fast lookup structures from discarded payloads for O(1) matching.
+
+    Maps each rejection key -> the max confidence it was discarded with, so the
+    matcher can let a materially-higher-confidence re-extraction back in. The
+    recency window is applied upstream in fetch_discarded_payloads(within_days),
+    so anything present here is still inside the active suppression window.
+    """
+    text_map: dict[str, float] = {}
+    slot_map: dict[tuple, float] = {}
+
+    def _record(d: dict, key, conf: float):
+        # Keep the strongest prior confidence for a key. A stored sentinel of
+        # None means "discarded without a confidence" — never let such a reject
+        # be overridden by the confidence margin (treated as +inf below).
+        if key in d:
+            cur = d[key]
+            if cur is None:
+                return
+            if conf is None or conf > cur:
+                d[key] = conf
+        else:
+            d[key] = conf
+
     for old in discarded_payloads:
+        # Distinguish "discarded with confidence 0.0" from "no confidence stored".
+        raw_conf = old.get("confidence")
+        conf = None if raw_conf is None else float(raw_conf)
         old_text = (old.get("text") or "").strip().lower()
         if old_text:
-            text_set.add(old_text)
+            _record(text_map, old_text, conf)
         e, p, v, s = old.get("entity"), old.get("property"), old.get("value"), old.get("scope")
         if e and p and v:
-            slot_set.add((e, p, v))
+            _record(slot_map, (e, p, v), conf)
             if s is not None:
-                slot_set.add((e, p, v, s))
-    return text_set, slot_set
+                _record(slot_map, (e, p, v, s), conf)
+    return text_map, slot_map
 
 
-def fast_candidate_matches_rejected(item: dict, text_set: set[str], slot_set: set[tuple]) -> bool:
-    """Check if an item matches any previously rejected memory using prebuilt index."""
+def fast_candidate_matches_rejected(item: dict, text_map: dict, slot_map: dict) -> bool:
+    """Return True only if this item should still be suppressed by a prior reject.
+
+    A match is overridden (allowed back in) when the new item's confidence
+    exceeds the discarded confidence by REJECT_CONF_OVERRIDE_MARGIN — a better
+    supported claim is no longer banned. REJECT_WINDOW_DAYS<=0 disables the gate.
+    """
+    if REJECT_WINDOW_DAYS <= 0:
+        return False
+
+    new_conf = float(item.get("confidence") or 0.0)
+
+    def _still_suppressed(prior_conf: float | None) -> bool:
+        # A reject with no stored confidence is non-overridable: we have no
+        # basis to claim the new evidence is "stronger", so keep suppressing
+        # for the full recency window.
+        if prior_conf is None:
+            return True
+        # Allow re-entry if the new evidence is materially stronger.
+        return new_conf < (prior_conf + REJECT_CONF_OVERRIDE_MARGIN)
+
     text = (item.get("text") or "").strip().lower()
-    if text and text in text_set:
-        return True
+    if text and text in text_map:
+        if _still_suppressed(text_map[text]):
+            return True
+
     e, p, v, s = item.get("entity"), item.get("property"), item.get("value"), item.get("scope")
     if e and p and v:
-        if (e, p, v) in slot_set:
+        if (e, p, v) in slot_map and _still_suppressed(slot_map[(e, p, v)]):
             return True
-        if s is not None and (e, p, v, s) in slot_set:
+        if s is not None and (e, p, v, s) in slot_map and _still_suppressed(slot_map[(e, p, v, s)]):
             return True
     return False
 
@@ -176,15 +241,27 @@ def apply_agent_policy(item: dict) -> tuple[str, str]:
     }
     explicit_approval = bool(item.get("approved_by") or item.get("approval_source"))
 
-    if confidence >= min_auto and (
-        explicit_authority and (explicit_approval or authority_basis == "system_tool_verified")
-    ):
+    # For user_explicit authority, the user's own statement IS the approval.
+    # The structural extraction pipeline cannot populate approved_by (no human
+    # review step), so requiring it blocks ALL automated memory ingestion.
+    # system_tool_verified is similarly self-approving.
+    self_approving = authority_basis in {"user_explicit", "system_tool_verified"}
+
+    if confidence >= min_auto and explicit_authority and (explicit_approval or self_approving):
         return "AUTO", "agent_policy_auto"
 
     if confidence >= min_inbox:
         return "INBOX", "agent_policy_inbox"
 
-    return "DISCARDED", "agent_policy_discard_below_threshold"
+    # Below the inbox threshold. Previously this was a hard DISCARD, which wrote
+    # the item into memory_discarded and (via the rejection gate) permanently
+    # banned it — so a claim that merely lacked context once could never return.
+    # Route to INBOX as a soft hold instead so it can be promoted when more
+    # evidence arrives. Set OPENCLAW_HARD_DISCARD_BELOW_THRESHOLD=1 to restore
+    # the old hard-discard behavior.
+    if os.environ.get("OPENCLAW_HARD_DISCARD_BELOW_THRESHOLD") == "1":
+        return "DISCARDED", "agent_policy_discard_below_threshold"
+    return "INBOX", "agent_policy_below_threshold_soft_hold"
 
 
 def decide_route(item: dict) -> tuple[str, str]:
@@ -292,10 +369,33 @@ def main():
     all_ids = [item.get("id") for item in items if item.get("id")]
     existing_ids = bulk_fetch_existing_ids(all_ids)
 
-    # --- Phase 3: Prefetch discarded payloads once, build fast lookup ---
-    discarded_payloads = fetch_discarded_payloads()
-    rejected_text_set, rejected_slot_set = build_rejected_index(discarded_payloads)
-    del discarded_payloads  # free memory
+    # --- Phase 3: SQL-side batch rejection check ---
+    # Instead of loading 1M+ discarded rows into Python (6GB+ RAM, minutes of
+    # processing), we check all candidate texts and slots against the discarded
+    # table in SQL using indexed queries. Returns only matches with their max
+    # prior confidence for the confidence-override-margin check.
+    within = REJECT_WINDOW_DAYS if REJECT_WINDOW_DAYS > 0 else None
+
+    # Collect candidate texts and slots for batch SQL lookup
+    if within is not None and within > 0:
+        candidate_texts = []
+        candidate_slots = []
+        for item in items:
+            text = (item.get("text") or "").strip().lower()
+            if text:
+                candidate_texts.append(text)
+            e, p, v = item.get("entity"), item.get("property"), item.get("value")
+            if e and p and v:
+                candidate_slots.append((e, p, v))
+
+        # One SQL round-trip each — indexed, returns only matches
+        rejected_text_map = check_rejected_texts_sql(candidate_texts, within_days=within)
+        rejected_slot_map = check_rejected_slots_sql(candidate_slots, within_days=within)
+    else:
+        # Rejection gate disabled (REJECT_WINDOW_DAYS=0) — skip SQL entirely.
+        # fast_candidate_matches_rejected() will return False immediately anyway.
+        rejected_text_map = {}
+        rejected_slot_map = {}
 
     # --- Phase 4: Classify each item (no DB writes yet) ---
     log_buf: list[str] = []
@@ -324,8 +424,8 @@ def main():
             any_output = True
             continue
 
-        # Rejected match against prebuilt index
-        if fast_candidate_matches_rejected(item, rejected_text_set, rejected_slot_set):
+        # Rejected match against SQL-fetched rejection maps
+        if fast_candidate_matches_rejected(item, rejected_text_map, rejected_slot_map):
             discarded_items.append(item)
             if item_id:
                 seen_batch_ids.add(item_id)

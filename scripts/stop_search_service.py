@@ -25,6 +25,18 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def proc_matches_service(pid: int) -> bool:
+    """Confirm `pid` is actually our uvicorn search service before signaling it.
+    Without this, a stale PID file whose PID has been recycled by an unrelated
+    process would cause stop to SIGTERM/SIGKILL the WRONG process.
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore")
+        return "uvicorn" in cmdline and "search_memory_service:app" in cmdline
+    except Exception:
+        return False
+
+
 def main() -> None:
     if not PID_FILE.exists():
         print(json.dumps({"status": "not_running"}))
@@ -42,6 +54,15 @@ def main() -> None:
         PID_FILE.unlink(missing_ok=True)
         META_FILE.unlink(missing_ok=True)
         print(json.dumps({"status": "already_dead", "pid": pid}))
+        return
+
+    # PID-reuse protection: the recorded PID is alive but is NOT our service
+    # (recycled by an unrelated process). Never signal it — just clear the
+    # stale tracking files.
+    if not proc_matches_service(pid):
+        PID_FILE.unlink(missing_ok=True)
+        META_FILE.unlink(missing_ok=True)
+        print(json.dumps({"status": "stale_pid_mismatch", "pid": pid}))
         return
 
     try:

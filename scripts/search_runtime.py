@@ -5,6 +5,7 @@ Key functions: get_embed_model, get_rerank_model, collect_project_sources, simpl
 """
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from extract_memory_fields import extract_fields
 from graph_store_neo4j import get_neo4j_driver
 from memory_db import hybrid_search_memory_items
 from vector_store_qdrant import search_memory_vectors
+
+LOGGER = logging.getLogger("openclaw.search_runtime")
 
 WORKSPACE = Path.home() / ".openclaw" / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
@@ -195,7 +198,20 @@ def rerank_rows(query: str, rows: list[dict], top_n: int = 12) -> list[dict]:
     pairs = [[query, row["text"]] for row in head]
     raw_scores = model.predict(pairs)
 
-    for row, raw in zip(head, raw_scores):
+    # Guard against silent score↔row misalignment (one score per pair is
+    # expected). On mismatch, degrade safely: log and return the rows in their
+    # current (base-score-sorted) order rather than mis-pairing rerank scores.
+    raw_scores = list(raw_scores)
+    if len(raw_scores) != len(head):
+        LOGGER.error(
+            "rerank score/row count mismatch (rows=%d scores=%d); "
+            "skipping rerank and returning base-score order",
+            len(head),
+            len(raw_scores),
+        )
+        return head + tail
+
+    for row, raw in zip(head, raw_scores, strict=True):
         row["rerank_raw"] = float(raw)
         row["rerank_score"] = sigmoid(float(raw))
         row["score"] = (row["score"] * 0.35) + (row["rerank_score"] * 1.25)

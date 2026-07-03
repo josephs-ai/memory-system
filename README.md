@@ -120,27 +120,50 @@ candidate ──► durable ──► superseded (replaced by newer fact)
 
 ## Quickstart
 
-```bash
-# 1. Start infrastructure
-git clone https://github.com/josephs-ai/Memory-System-claw.git
-cd Memory-System-claw
-docker compose up -d   # PostgreSQL, Qdrant, Neo4j
+Linux and macOS are both supported for the Python services. The easiest local
+install uses Docker Compose for PostgreSQL, Qdrant, and Neo4j, then runs the
+memory services directly from a Python virtual environment.
 
-# 2. Install
+For a dedicated macOS walkthrough, see [README-macOS.md](README-macOS.md).
+
+```bash
+# 1. Clone
+git clone https://github.com/josephs-ai/Engram.git
+cd Engram
+
+# 2. Create a Python environment (Python 3.11+)
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -e ".[all]"
 
-# 3. Configure
-export OPENCLAW_MEMORY_DSN="host=localhost dbname=openclaw_memory user=openclaw password=openclaw"
+# 3. Start infrastructure: PostgreSQL, Qdrant, Neo4j
+docker compose up -d
 
-# 4. Initialize
+# 4. Configure the memory DB connection explicitly
+export OPENCLAW_MEMORY_DSN="host=localhost port=5432 dbname=openclaw_memory user=openclaw password=openclaw"
+# Legacy alias is also accepted by the codebase, but OPENCLAW_MEMORY_DSN is canonical.
+export OPENCLAW_MEMORY_DB_DSN="$OPENCLAW_MEMORY_DSN"
+
+# 5. Initialize/repair schema when using an existing database volume.
+# Fresh docker-compose volumes load scripts/memory_db_schema.sql automatically.
 psql "$OPENCLAW_MEMORY_DSN" -f scripts/memory_db_schema.sql
 
-# 5. Start search service
+# 6. Start search service
 python scripts/search_memory_service.py --port 8791
 
-# 6. Query
+# 7. Query
 curl "http://localhost:8791/search?q=how+does+the+retrieval+pipeline+work&limit=5"
 ```
+
+Notes:
+
+- `docker compose up -d` works on Linux, Docker Desktop for Mac, and Colima.
+- If port `5432` is already used by a local PostgreSQL install, change the host
+  port in `docker-compose.yml` and update `OPENCLAW_MEMORY_DSN` to match.
+- Linux-only helper scripts that call `systemctl --user` are maintenance
+  conveniences, not a core runtime requirement. On macOS, use `launchd`,
+  OpenClaw cron, or a normal long-running shell/service wrapper instead.
 
 ---
 

@@ -322,7 +322,7 @@ def _find_regressions(chunk_ids: list[str]) -> list[dict]:
     """Query patch ledger for regression sources."""
     try:
         import psycopg
-        DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+        DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
         conn = psycopg.connect(DB_DSN)
         try:
             with conn.cursor() as cur:

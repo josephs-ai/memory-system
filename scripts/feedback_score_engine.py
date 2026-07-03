@@ -37,7 +37,7 @@ import psycopg
 
 LOGGER = logging.getLogger("openclaw.feedback_score_engine")
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 
 # Scoring constants
 USEFUL_WEIGHT = 1.0       # Base weight for a "useful" mark

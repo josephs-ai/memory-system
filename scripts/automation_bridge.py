@@ -151,7 +151,7 @@ def process_automation_log(
     if (resolve_chunks or link_to_ledger) and not suite.success:
         try:
             import psycopg
-            DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+            DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
             conn = psycopg.connect(DB_DSN)
             try:
                 if resolve_chunks:

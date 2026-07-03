@@ -17,6 +17,7 @@ WORKSPACE = Path.home() / ".openclaw" / "workspace"
 SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
 
 EXTRACT_SCRIPT = SCRIPTS_DIR / "extract_updates.py"
+QWEN_EXTRACT_SCRIPT = SCRIPTS_DIR / "extract_updates_qwen.py"
 GENERATE_SCRIPT = SCRIPTS_DIR / "generate_memory_candidates.py"
 FILTER_SCRIPT = SCRIPTS_DIR / "filter_memory_candidates.py"
 JUDGE_SCRIPT = SCRIPTS_DIR / "judge_memory_candidates.py"
@@ -31,8 +32,17 @@ def run_stage(cmd):
         cmd,
         capture_output=True,
         text=True,
-        check=True,
     )
+    if result.returncode != 0:
+        print("SUBPROCESS_FAILED", file=sys.stderr)
+        print("command=" + json.dumps(cmd), file=sys.stderr)
+        if result.stdout:
+            print("--- child stdout ---", file=sys.stderr)
+            print(result.stdout[-8000:], file=sys.stderr)
+        if result.stderr:
+            print("--- child stderr ---", file=sys.stderr)
+            print(result.stderr[-8000:], file=sys.stderr)
+        result.check_returncode()
     return result.stdout.strip()
 
 
@@ -152,6 +162,9 @@ def cache_key(
     source_session: str,
     legacy_pipeline: bool,
     extractor_fingerprint: str,
+    extraction_mode: str = "structural",
+    qwen_model: str = "",
+    ollama_url: str = "",
     cursor_data: dict | None = None,
 ) -> str:
     return json.dumps(
@@ -160,6 +173,9 @@ def cache_key(
             "source_agent": source_agent,
             "session_family": stable_session_family(source_session, cursor_data),
             "legacy_pipeline": legacy_pipeline,
+            "extraction_mode": extraction_mode,
+            "qwen_model": qwen_model,
+            "ollama_url": ollama_url,
             "extractor_fingerprint": extractor_fingerprint,
         },
         sort_keys=True,
@@ -204,6 +220,39 @@ def put_cached_items(cache: dict, key: str, sig: dict, items: list[dict]):
     }
     prune_cache(cache)
 
+
+
+def run_qwen_extract(
+    chunk_file: Path,
+    *,
+    source_agent: str,
+    source_session: str,
+    ollama_url: str = "",
+    model: str = "",
+) -> list[dict]:
+    """Run the optional Qwen/Ollama extraction mode (opt-in only, never default)."""
+    cmd = [
+        "python3",
+        str(QWEN_EXTRACT_SCRIPT),
+        str(chunk_file),
+        "--source-agent", source_agent,
+        "--source-session", source_session,
+        "--source-chunk", chunk_file.name,
+    ]
+    if ollama_url:
+        cmd += ["--ollama-url", ollama_url]
+    if model:
+        cmd += ["--model", model]
+    try:
+        extracted = run_stage(cmd)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or str(exc)).strip()
+        print(json.dumps({"chunk": chunk_file.name, "qwen_error": err}), file=sys.stderr)
+        return []
+    except Exception as exc:
+        print(json.dumps({"chunk": chunk_file.name, "qwen_error": str(exc)}), file=sys.stderr)
+        return []
+    return load_jsonl_text(extracted)
 
 
 def run_structural_extract(chunk_file: Path, *, source_agent: str, source_session: str) -> list[dict]:
@@ -272,6 +321,17 @@ def main():
     parser.add_argument("--shadow-compare", action="store_true")
     parser.add_argument("--ignore-cache", action="store_true")
     parser.add_argument("--cursor-file")
+    # Opt-in extraction mode. Default is "structural" (fast, deterministic, no LLM).
+    # "qwen"   — Qwen/Ollama only (requires Mac node or local Ollama)
+    # "hybrid" — structural first, then Qwen; results merged and deduped
+    parser.add_argument(
+        "--extraction-mode",
+        choices=["structural", "qwen", "hybrid"],
+        default="structural",
+        help="structural (default) | qwen (Ollama opt-in) | hybrid (both, deduped)",
+    )
+    parser.add_argument("--ollama-url", default="", help="Override Ollama URL for qwen/hybrid modes")
+    parser.add_argument("--qwen-model", default="", help="Override Qwen model name")
     args = parser.parse_args()
 
     chunk_dir = Path(args.chunk_dir)
@@ -291,13 +351,23 @@ def main():
         if not args.reduced_only:
             print(f"===== {chunk_file.name} =====")
 
-        sig = chunk_signature(chunk_file)
+        try:
+            sig = chunk_signature(chunk_file)
+        except FileNotFoundError:
+            print(
+                json.dumps({"chunk": chunk_file.name, "skip": "missing_after_discovery"}),
+                file=sys.stderr,
+            )
+            continue
         key = cache_key(
             chunk_file,
             source_agent=args.source_agent,
             source_session=args.source_session,
             legacy_pipeline=args.legacy_pipeline,
             extractor_fingerprint=EXTRACTOR_FINGERPRINT,
+            extraction_mode=args.extraction_mode,
+            qwen_model=args.qwen_model,
+            ollama_url=args.ollama_url,
             cursor_data=cursor_data,
         )
         cached_items = None if args.ignore_cache else get_cached_items(cache, key, sig)
@@ -317,11 +387,44 @@ def main():
                     source_session=args.source_session,
                 )
             else:
-                items = run_structural_extract(
-                    chunk_file,
-                    source_agent=args.source_agent,
-                    source_session=args.source_session,
-                )
+                if args.extraction_mode == "structural":
+                    items = run_structural_extract(
+                        chunk_file,
+                        source_agent=args.source_agent,
+                        source_session=args.source_session,
+                    )
+                elif args.extraction_mode == "qwen":
+                    items = run_qwen_extract(
+                        chunk_file,
+                        source_agent=args.source_agent,
+                        source_session=args.source_session,
+                        ollama_url=args.ollama_url,
+                        model=args.qwen_model,
+                    )
+                else:  # hybrid
+                    structural_items = run_structural_extract(
+                        chunk_file,
+                        source_agent=args.source_agent,
+                        source_session=args.source_session,
+                    )
+                    qwen_items = run_qwen_extract(
+                        chunk_file,
+                        source_agent=args.source_agent,
+                        source_session=args.source_session,
+                        ollama_url=args.ollama_url,
+                        model=args.qwen_model,
+                    )
+                    items = structural_items + qwen_items
+                    print(
+                        json.dumps(
+                            {
+                                "chunk": chunk_file.name,
+                                "structural_count": len(structural_items),
+                                "qwen_count": len(qwen_items),
+                            }
+                        ),
+                        file=sys.stderr,
+                    )
                 if args.shadow_compare:
                     legacy_items = run_legacy_extract(
                         chunk_file,
@@ -332,6 +435,8 @@ def main():
                         json.dumps(
                             {
                                 "chunk": chunk_file.name,
+                                "mode": args.extraction_mode,
+                                "items_count": len(items),
                                 "structural_count": len(items),
                                 "legacy_count": len(legacy_items),
                             }

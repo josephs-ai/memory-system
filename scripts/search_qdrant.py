@@ -22,6 +22,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--query", required=True)
     parser.add_argument("--limit", type=int, default=5)
+    # Temporal window push-down (epoch seconds). as_of is folded into --until by
+    # the caller (as_of = upper bound). Omit for no temporal filtering.
+    parser.add_argument("--since-epoch", type=int, default=None)
+    parser.add_argument("--until-epoch", type=int, default=None)
     args = parser.parse_args()
 
     model = SentenceTransformer(MODEL_NAME, device="cpu")
@@ -32,16 +36,22 @@ def main():
         show_progress_bar=False,
     )[0]
 
-    results = search_memory_vectors(query_vec, limit=args.limit)
+    results = search_memory_vectors(
+        query_vec,
+        limit=args.limit,
+        since_epoch=args.since_epoch,
+        until_epoch=args.until_epoch,
+    )
 
     if not results:
         print("NONE")
         return
 
+    import json
     for r in results:
         payload = r.payload or {}
         print(
-            {
+            json.dumps({
                 "score": r.score,
                 "id": payload.get("id"),
                 "text": payload.get("text"),
@@ -49,7 +59,7 @@ def main():
                 "property": payload.get("property"),
                 "value": payload.get("value"),
                 "scope": payload.get("scope"),
-            }
+            })
         )
 
 

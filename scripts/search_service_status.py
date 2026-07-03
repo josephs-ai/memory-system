@@ -140,7 +140,16 @@ def main() -> None:
 
     start_time_warning = None
     stale_pid = False
-    if pid and running and meta_started_at and live_started_at:
+    if pid_exists and pid and not running:
+        # Most common stale-PID failure mode: the service died after writing
+        # runtime/search_service.pid. Report this explicitly so monitors do not
+        # confuse "offline" with "cleanly stopped".
+        stale_pid = True
+        start_time_warning = {
+            "pid": pid,
+            "warning": "pid_file_points_to_dead_process",
+        }
+    elif pid and running and meta_started_at and live_started_at:
         # PID recycle protection: if process creation time differs meaningfully,
         # treat the pid file/meta as stale.
         if abs(float(meta_started_at) - float(live_started_at)) > 5:

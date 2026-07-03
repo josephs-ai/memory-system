@@ -43,6 +43,7 @@ from heartbeat_manager_common import LOG_FILE, build_runtime_env
 
 POLL_SECONDS = 5
 DEFAULT_DEBOUNCE_SECONDS = 12
+SEARCH_SERVICE_ENSURE_SECONDS = int(os.environ.get("OPENCLAW_SEARCH_SERVICE_ENSURE_SECONDS", "60"))
 
 IGNORED_DIR_NAMES = {
     "__pycache__",
@@ -223,6 +224,39 @@ def run_pipeline_and_sync(env: dict[str, str]) -> dict[str, Any]:
     return summary
 
 
+def maybe_ensure_search_service(env: dict[str, str]) -> None:
+    """Periodically ensure the warm memory search service is alive.
+
+    This is deliberately non-fatal for checkpointing: retrieval should be loud in
+    logs/state when degraded, but a failed search daemon restart must not stop
+    transcript checkpointing or memory maintenance.
+    """
+    now = time.time()
+    last = float(get_state("last_search_service_ensure_at", 0) or 0)
+    if (now - last) < SEARCH_SERVICE_ENSURE_SECONDS:
+        return
+
+    set_state("last_search_service_ensure_at", now)
+    cmd = [sys.executable, str(SCRIPTS_DIR / "ensure_search_service.py")]
+    proc = run_cmd(cmd, env)
+    result = {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-8000:],
+        "stderr": proc.stderr[-8000:],
+    }
+    set_state("last_search_service_ensure_result", result)
+
+    if proc.returncode == 0:
+        LOGGER.info("search_service_ensure_ok stdout=%s", proc.stdout[-1000:])
+    else:
+        LOGGER.warning(
+            "search_service_ensure_failed returncode=%s stdout=%s stderr=%s",
+            proc.returncode,
+            proc.stdout[-1000:],
+            proc.stderr[-1000:],
+        )
+
+
 def consume_watcher_trigger() -> dict[str, Any] | None:
     trigger = get_state("watcher_trigger", None)
     if not trigger or not isinstance(trigger, dict):
@@ -335,6 +369,8 @@ def worker_loop(once: bool = False) -> None:
     pending_since: float | None = None
 
     while not STOP_REQUESTED:
+        maybe_ensure_search_service(build_runtime_env())
+
         tuning = compute_effective_interval(default_interval)
         interval = int(tuning["effective_interval_seconds"])
         set_state("heartbeat_tuning", tuning)

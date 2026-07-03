@@ -39,7 +39,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 QDRANT_HOST = os.environ.get("OPENCLAW_QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("OPENCLAW_QDRANT_PORT", "6333"))
 NEO4J_URI = os.environ.get("OPENCLAW_NEO4J_URI", "bolt://localhost:7687")
@@ -233,7 +233,9 @@ def _rerank_hits(
     pairs = [(query, _build_rerank_text(h)) for h in capped]
     scores = reranker.predict(pairs)
 
-    for hit, score in zip(capped, scores):
+    # strict=True: scores are produced from `capped` 1:1; a mismatch would
+    # assign rerank scores to the wrong hits and silently corrupt ranking.
+    for hit, score in zip(capped, scores, strict=True):
         hit["rerank_score"] = float(score)
 
     capped.sort(key=lambda x: x.get("rerank_score", -1e9), reverse=True)

@@ -40,7 +40,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 QDRANT_HOST = os.environ.get("OPENCLAW_QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("OPENCLAW_QDRANT_PORT", "6333"))
 COLLECTION_NAME = "code_chunks"  # Isolated from "memory_items"
@@ -263,7 +263,10 @@ def main():
 
             # Prepare Qdrant points batch
             qdrant_points = []
-            for chunk, emb in zip(batch, embeddings):
+            # strict=True: chunks and embeddings must stay 1:1 (written to PG +
+            # Qdrant keyed by chunk["id"]); a count mismatch must fail loud
+            # rather than silently corrupt the code index.
+            for chunk, emb in zip(batch, embeddings, strict=True):
                 vector = emb.tolist()
 
                 # Write to PostgreSQL

@@ -43,11 +43,39 @@ CONFIG_JSON = MEMORY_ROOT / "config.json"
 # Database
 # ---------------------------------------------------------------------------
 
-DB_DSN = (
-    os.environ.get("OPENCLAW_MEMORY_DSN")
-    or os.environ.get("OPENCLAW_MEMORY_DB_DSN")
-    or "dbname=openclaw_memory"
-)
+# Single canonical default. Bare DSN (no user/password) so it works against a
+# local Postgres via peer/socket auth; CI and containers must supply a full DSN
+# via the env vars below. NOTE: peer auth is why the bare default historically
+# "worked" locally despite the env-var-name split — that masked the drift.
+DEFAULT_DB_DSN = "dbname=openclaw_memory"
+
+
+def resolve_db_dsn() -> str:
+    """Resolve the PostgreSQL DSN from the environment at CALL time.
+
+    Accepts BOTH historical env var names so a value set under either name is
+    honored uniformly across every module (this is the fix for the env-var
+    drift where ~30 scripts read OPENCLAW_MEMORY_DSN while the core data layer
+    read OPENCLAW_MEMORY_DB_DSN, causing silent identity divergence):
+
+        1. OPENCLAW_MEMORY_DSN     (canonical)
+        2. OPENCLAW_MEMORY_DB_DSN  (legacy alias, e.g. live .env)
+
+    Resolving at call time (not import time) lets daemons/tests that set the
+    env after import still pick up the correct value. The first non-empty
+    value wins; falls back to DEFAULT_DB_DSN. Empty-string values are ignored
+    so an accidentally-blank export doesn't shadow the alias.
+    """
+    return (
+        os.environ.get("OPENCLAW_MEMORY_DSN")
+        or os.environ.get("OPENCLAW_MEMORY_DB_DSN")
+        or DEFAULT_DB_DSN
+    )
+
+
+# Module-level convenience (import-time snapshot). Prefer resolve_db_dsn() in
+# code paths that may run before the environment is fully populated.
+DB_DSN = resolve_db_dsn()
 
 # ---------------------------------------------------------------------------
 # Qdrant
