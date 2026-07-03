@@ -32,7 +32,7 @@ import psycopg
 
 LOGGER = logging.getLogger("openclaw.retrieval_metrics")
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 
 DEFAULT_WINDOW_DAYS = 30
 

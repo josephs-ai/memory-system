@@ -11,6 +11,7 @@ REFRESH_PROFILES = {
     "coder": {
         "interval_seconds": 300,
         "files": [
+            "__LATEST_DAILY__",
             "browser.md",
             "worker.md",
             "gateway.md",

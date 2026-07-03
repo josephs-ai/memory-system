@@ -41,7 +41,15 @@ def load_env_file(path: Path) -> dict[str, str]:
 for _k, _v in load_env_file(ENV_FILE).items():
     os.environ.setdefault(_k, _v)
 
-DEFAULT_DSN = os.environ.get("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory user=postgres")
+# Resolve via the single canonical resolver AFTER .env is loaded into the
+# environment above. Honors both env var names and uses one shared default —
+# previously this defaulted to "...user=postgres", a THIRD distinct identity
+# (memory_db.py defaulted to no user), so the same process could connect under
+# different roles depending on which module opened the pool. Centralizing
+# removes that divergence.
+from config import resolve_db_dsn
+
+DEFAULT_DSN = resolve_db_dsn()
 CHECKPOINT_LOCK_KEY = 913004271
 STALE_PROCESSING_SECONDS = int(os.environ.get("OPENCLAW_CHECKPOINT_STALE_SECONDS", "300"))
 

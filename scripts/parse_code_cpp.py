@@ -53,7 +53,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from base_code_parser import BaseCodeParser
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 
 # Unreal Engine macros to extract as decorators
 UE_CLASS_MACROS = {"UCLASS", "USTRUCT", "UENUM", "UINTERFACE"}

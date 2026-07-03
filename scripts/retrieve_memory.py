@@ -31,7 +31,8 @@ SELECT
   c.chunk_index,
   c.heading,
   c.text,
-  e.vector_path
+  e.vector_path,
+  c.created_at
 FROM chunks c
 JOIN documents d ON d.id = c.document_id
 JOIN embeddings e ON e.chunk_id = c.id
@@ -39,7 +40,7 @@ ORDER BY c.id
 """)
 rows = cur.fetchall()
 results = []
-for chunk_id, path, chunk_index, heading, text, vector_path in rows:
+for chunk_id, path, chunk_index, heading, text, vector_path, created_at in rows:
     vec = np.load(vector_path).astype(np.float32)
 
     denom = (np.linalg.norm(qvec) * np.linalg.norm(vec))
@@ -54,10 +55,18 @@ for chunk_id, path, chunk_index, heading, text, vector_path in rows:
         "chunk_index": chunk_index,
         "heading": heading,
         "text": text,
-        "score": score
+        "score": score,
+        "created_at": created_at,
     })
 results.sort(key=lambda x: x["score"], reverse=True)
 top = results[:args.topk]
+
+# T1: surface temporal metadata on legacy SQLite path via shared helper.
+try:
+    from temporal import enrich_rows
+    enrich_rows(top)
+except Exception:
+    pass
 
 now = datetime.utcnow().isoformat() + "Z"
 cur.execute(
@@ -70,7 +79,8 @@ print(f"Query: {args.query}")
 print()
 
 for i, r in enumerate(top, 1):
-    print(f"[{i}] score={r['score']:.4f} path={r['path']} chunk={r['chunk_index']}")
+    when = r.get("temporal_label") or r.get("created_at") or "undated"
+    print(f"[{i}] score={r['score']:.4f} ({when}) path={r['path']} chunk={r['chunk_index']}")
     if r["heading"]:
         print(f"    heading: {r['heading']}")
     preview = r["text"][:300].replace("\n", " ")

@@ -32,7 +32,7 @@ import psycopg
 
 LOGGER = logging.getLogger("openclaw.auto_demote_bad_items")
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 
 # Default thresholds
 DEFAULT_MIN_BAD = 3          # Minimum "bad" feedback count

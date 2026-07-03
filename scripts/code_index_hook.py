@@ -55,7 +55,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
-DB_DSN = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+DB_DSN = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Ensure imports work
@@ -177,7 +177,9 @@ def reembed_changed_chunks() -> int:
             )
 
             points = []
-            for chunk, emb in zip(chunks, embeddings):
+            # strict=True: chunk↔embedding alignment is load-bearing (upsert
+            # keyed by chunk["id"]); never silently truncate/mis-pair.
+            for chunk, emb in zip(chunks, embeddings, strict=True):
                 vector = emb.tolist()
                 upsert_pg_embedding(conn, chunk["id"], MODEL_NAME, vector)
                 points.append(

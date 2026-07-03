@@ -294,14 +294,17 @@ def print_dehydrated(label, pairs, no_header=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--file")
+    parser.add_argument("--transcript", help="Alias for --file")
     parser.add_argument("--agent")
     parser.add_argument("--all-agents", action="store_true")
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--no-header", action="store_true")
     args = parser.parse_args()
 
-    if args.file:
-        path = Path(args.file)
+    explicit_file = args.transcript or args.file
+
+    if explicit_file:
+        path = Path(explicit_file)
         pairs = dehydrate_events(load_events(path, args.offset))
         print_dehydrated(str(path), pairs, args.no_header)
         return

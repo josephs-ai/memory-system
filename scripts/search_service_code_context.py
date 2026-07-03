@@ -130,7 +130,7 @@ async def context_health() -> dict[str, Any]:
 
     try:
         import psycopg
-        dsn = os.environ.get("OPENCLAW_MEMORY_DSN", "dbname=openclaw_memory")
+        dsn = (os.environ.get("OPENCLAW_MEMORY_DSN") or os.environ.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory")  # honor both canonical DSN env names
         conn = psycopg.connect(dsn)
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM code_chunks")

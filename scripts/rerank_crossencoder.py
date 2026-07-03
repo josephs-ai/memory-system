@@ -18,7 +18,7 @@ def main():
     pairs = [[args.query, t] for t in args.text]
     scores = model.predict(pairs)
 
-    rows = list(zip(args.text, scores))
+    rows = list(zip(args.text, scores, strict=True))  # text↔score must stay 1:1
     rows.sort(key=lambda x: float(x[1]), reverse=True)
 
     for text, score in rows:

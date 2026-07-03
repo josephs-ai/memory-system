@@ -71,7 +71,9 @@ def main():
     old_vecs = model.encode(existing).astype(np.float32)
 
     scored = []
-    for old, vec in zip(existing, old_vecs):
+    # strict=True: each existing candidate must line up with its own vector;
+    # a mismatch would attribute the wrong similarity score to a candidate.
+    for old, vec in zip(existing, old_vecs, strict=True):
         sim = cosine(new_vec, vec)
         scored.append((sim, old))
 

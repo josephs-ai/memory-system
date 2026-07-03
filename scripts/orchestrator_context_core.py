@@ -30,9 +30,21 @@ from orchestrator.memory_contract import (  # noqa: E402
 
 
 def _get_dsn() -> str:
-    dsn = os.environ.get("OPENCLAW_MEMORY_DB_DSN") or os.environ.get("DB")
+    # Honor both canonical env names (plus the legacy `DB` alias). Previously
+    # this read only OPENCLAW_MEMORY_DB_DSN, so a deployment that set only
+    # OPENCLAW_MEMORY_DSN would raise here even though the rest of the system
+    # was configured correctly. Preserve the strict no-silent-default behavior:
+    # this path REQUIRES an explicit DSN and must not fall back to a bare
+    # default, so we resolve the names directly rather than via resolve_db_dsn().
+    dsn = (
+        os.environ.get("OPENCLAW_MEMORY_DSN")
+        or os.environ.get("OPENCLAW_MEMORY_DB_DSN")
+        or os.environ.get("DB")
+    )
     if not dsn:
-        raise RuntimeError("OPENCLAW_MEMORY_DB_DSN or DB is not set")
+        raise RuntimeError(
+            "No DSN configured: set OPENCLAW_MEMORY_DSN, OPENCLAW_MEMORY_DB_DSN, or DB"
+        )
     return dsn
 
 

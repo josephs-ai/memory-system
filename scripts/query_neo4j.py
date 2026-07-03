@@ -62,7 +62,7 @@ def _run_text_search(session, *, query: str, limit: int, project_id: str | None,
     return session.run(
         """
         MATCH (m:MemoryItem)-[:ASSERTED_IN]->(s:ContextScope)
-        WHERE toLower(m.text) CONTAINS toLower($query)
+        WHERE toLower(m.text) CONTAINS toLower($q)
           AND ($project_id IS NULL OR s.project_id = $project_id)
           AND ($subproject_id IS NULL OR s.subproject_id = $subproject_id)
           AND ($workflow_id IS NULL OR s.workflow_id = $workflow_id)
@@ -81,7 +81,7 @@ def _run_text_search(session, *, query: str, limit: int, project_id: str | None,
         ORDER BY m.confidence DESC, m.importance DESC, m.id ASC
         LIMIT $limit
         """,
-        query=query,
+        q=query,
         limit=limit,
         project_id=project_id,
         subproject_id=subproject_id,

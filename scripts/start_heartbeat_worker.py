@@ -19,6 +19,7 @@ from heartbeat_manager_common import (
     atomic_write_text,
     build_runtime_env,
     ensure_runtime_dir,
+    worker_python,
     pid_alive,
     process_group_alive,
     read_json,
@@ -46,9 +47,11 @@ def main():
 
     env = build_runtime_env()
 
+    py = worker_python()
+
     with open(LOG_FILE, "a", encoding="utf-8") as logf:
         proc = subprocess.Popen(
-            [sys.executable, str(WORKER_SCRIPT)],
+            [py, str(WORKER_SCRIPT)],
             stdin=subprocess.DEVNULL,
             stdout=logf,
             stderr=logf,
@@ -68,7 +71,8 @@ def main():
     meta = {
         "pid": proc.pid,
         "started_at": int(time.time()),
-        "python": sys.executable,
+        "manager_python": sys.executable,
+        "worker_python": py,
         "worker_script": str(WORKER_SCRIPT),
         "log_file": str(LOG_FILE),
         "env_file_used": str(META_FILE.parent.parent / ".env"),

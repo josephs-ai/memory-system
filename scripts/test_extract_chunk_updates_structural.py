@@ -99,3 +99,34 @@ def test_extract_chunk_updates_dedupes_structural_output(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     rows = [json.loads(line) for line in proc.stdout.splitlines() if line.strip() and line.strip() != "NONE"]
     assert len(rows) == 1
+
+
+
+def test_extract_chunk_updates_skips_chunks_removed_after_discovery(tmp_path: Path):
+    chunk_dir = tmp_path / "chunks"
+    chunk_dir.mkdir()
+    (chunk_dir / "001.txt").write_text("USER: In pipeline Alpha, this rule must stay automated.\n", encoding="utf-8")
+    (chunk_dir / "missing.txt").symlink_to(chunk_dir / "does-not-exist.txt")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(EXTRACT_CHUNK_UPDATES),
+            "--chunk-dir",
+            str(chunk_dir),
+            "--source-agent",
+            "tester",
+            "--source-session",
+            "session-1",
+            "--reduced-only",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "missing_after_discovery" in proc.stderr
+    rows = [json.loads(line) for line in proc.stdout.splitlines() if line.strip() and line.strip() != "NONE"]
+    assert len(rows) == 1

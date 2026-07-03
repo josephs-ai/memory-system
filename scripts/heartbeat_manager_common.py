@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,24 @@ PID_FILE = RUNTIME_DIR / "heartbeat_worker.pid"
 META_FILE = RUNTIME_DIR / "heartbeat_worker.json"
 LOG_FILE = MEMORY_INDEX_DIR / "heartbeat_worker.log"
 WORKER_SCRIPT = MEMORY_INDEX_DIR / "scripts" / "heartbeat_memory_worker.py"
+DEFAULT_MEMORY_VENV_PYTHON = Path.home() / ".openclaw" / "venvs" / "memory-db" / "bin" / "python"
+
+
+def worker_python() -> str:
+    """Return the Python interpreter that should run memory worker jobs.
+
+    Heartbeat managers are often invoked by whatever Python OpenClaw happens to
+    use for the current session. The memory pipeline itself depends on packages
+    installed in the memory-db venv (torch, sentence-transformers, psycopg,
+    etc.), so prefer that interpreter when available. Allow an explicit override
+    for deployments with a different venv layout.
+    """
+    override = os.environ.get("OPENCLAW_HEARTBEAT_PYTHON")
+    if override:
+        return override
+    if DEFAULT_MEMORY_VENV_PYTHON.exists():
+        return str(DEFAULT_MEMORY_VENV_PYTHON)
+    return sys.executable
 
 
 def ensure_runtime_dir() -> None:
@@ -48,7 +67,14 @@ def build_runtime_env() -> dict[str, str]:
     for key, value in file_env.items():
         env.setdefault(key, value)
 
-    env.setdefault("OPENCLAW_MEMORY_DB_DSN", "dbname=openclaw_memory")
+    # Defense-in-depth: ensure BOTH canonical DSN names are present for spawned
+    # workers (whichever name a worker module reads). When .env supplies a DSN
+    # (under either name), mirror it to the other so the two never disagree;
+    # otherwise fall back to the shared bare default. .env is loaded above, so
+    # these setdefaults only fill genuinely-missing values.
+    _dsn = env.get("OPENCLAW_MEMORY_DSN") or env.get("OPENCLAW_MEMORY_DB_DSN") or "dbname=openclaw_memory"
+    env.setdefault("OPENCLAW_MEMORY_DSN", _dsn)
+    env.setdefault("OPENCLAW_MEMORY_DB_DSN", _dsn)
     env.setdefault("OPENCLAW_NEO4J_PASSWORD", "neo4jpassword")
     return env
 

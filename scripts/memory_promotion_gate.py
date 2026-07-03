@@ -27,7 +27,11 @@ def explicit_promotion_gate(item: dict) -> tuple[bool, list[str]]:
         reasons.append(f"authority_basis:{authority_basis or 'unknown'}")
 
     explicit_approval_present = bool(approved_by or approval_source)
-    if requires_approval and authority_basis != "system_tool_verified" and not explicit_approval_present:
+    # user_explicit authority is self-approving: the user's own statement is
+    # the approval. Requiring a separate approved_by field blocks ALL
+    # automated pipeline ingestion since the extractor never fills it.
+    self_approving = authority_basis in {"user_explicit", "system_tool_verified"}
+    if requires_approval and not self_approving and not explicit_approval_present:
         reasons.append("missing_explicit_approval")
 
     return (not reasons), reasons
