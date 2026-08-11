@@ -836,3 +836,276 @@ def print_results_table(all_results: list[dict]) -> None:
     print("=" * 60)
     print(format_results_table(all_results))
     print("=" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# LLM reader, intent routing, typed-lane retrieval, and trace capture
+#
+# These were imported by five runners (fever, hotpotqa, musique, longmemeval,
+# temporalqa) but defined nowhere in the repo, so every one of them died at
+# import. The signatures below are derived from those call sites, not invented:
+# the reader dict shape is exactly what fever/run.py already destructures
+# (provider/client/model across openai, anthropic, google), and
+# retrieve_typed_lanes returns (results, latency) to match retrieve().
+# ---------------------------------------------------------------------------
+
+LLM_READER_MODEL = os.environ.get("LLM_READER_MODEL", "claude-opus-4-6")
+
+_READER_CACHE: dict | None = None
+_READER_TRIED = False
+
+
+def _get_llm_reader() -> dict | None:
+    """
+    Return {"provider", "client", "model"} for the first usable LLM provider,
+    or None when no credentials are configured.
+
+    Returning None rather than raising is deliberate: every call site treats a
+    missing reader as "fall back to the non-LLM path" (fever drops to NLI,
+    hotpotqa/musique to span overlap). A benchmark run without API keys should
+    report weaker scores, not crash.
+
+    Cached because the readers are constructed per question, and building a
+    client per call turns a rate-limit into a connection storm.
+    """
+    global _READER_CACHE, _READER_TRIED
+    if _READER_TRIED:
+        return _READER_CACHE
+    _READER_TRIED = True
+
+    model = LLM_READER_MODEL
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
+
+            _READER_CACHE = {"provider": "anthropic", "client": anthropic.Anthropic(), "model": model}
+            return _READER_CACHE
+        except Exception as e:  # pragma: no cover - depends on local env
+            LOGGER.warning("anthropic reader unavailable: %s", e)
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            import openai
+
+            _READER_CACHE = {
+                "provider": "openai",
+                "client": openai.OpenAI(),
+                "model": os.environ.get("LLM_READER_MODEL_OPENAI", "gpt-4o-mini"),
+            }
+            return _READER_CACHE
+        except Exception as e:  # pragma: no cover
+            LOGGER.warning("openai reader unavailable: %s", e)
+    if os.environ.get("GOOGLE_API_KEY"):
+        try:
+            from google import genai
+
+            _READER_CACHE = {
+                "provider": "google",
+                "client": genai.Client(),
+                "model": os.environ.get("LLM_READER_MODEL_GOOGLE", "gemini-2.5-flash"),
+            }
+            return _READER_CACHE
+        except Exception as e:  # pragma: no cover
+            LOGGER.warning("google reader unavailable: %s", e)
+
+    LOGGER.warning("no LLM reader configured; runners will use their non-LLM fallback")
+    return None
+
+
+def _reader_complete(reader: dict, prompt: str, *, max_tokens: int = 128) -> str | None:
+    """One completion, normalised across the three provider SDKs."""
+    try:
+        if reader["provider"] == "anthropic":
+            resp = reader["client"].messages.create(
+                model=reader["model"], max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        if reader["provider"] == "openai":
+            resp = reader["client"].chat.completions.create(
+                model=reader["model"], max_tokens=max_tokens, temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (resp.choices[0].message.content or "").strip()
+        if reader["provider"] == "google":
+            resp = reader["client"].models.generate_content(
+                model=reader["model"], contents=prompt,
+            )
+            return (resp.text or "").strip()
+    except Exception as e:
+        LOGGER.warning("reader completion failed: %s", e)
+    return None
+
+
+def llm_read_answer(question: str, retrieved: list[dict], *, max_items: int = 10) -> str | None:
+    """
+    Answer `question` from `retrieved` alone. None when no reader is configured
+    or the model declines, which callers treat as "use the extractive fallback".
+
+    The prompt forbids outside knowledge on purpose: this measures the
+    retrieval, so an answer the model knew independently would inflate the
+    score without the memory system having contributed anything.
+    """
+    reader = _get_llm_reader()
+    if reader is None or not retrieved:
+        return None
+
+    lines = []
+    for i, r in enumerate(retrieved[:max_items], 1):
+        text = ((r.get("text") or "") + " " + (r.get("value") or "")).strip()
+        if text:
+            lines.append(f"{i}. {text[:500]}")
+    if not lines:
+        return None
+
+    prompt = (
+        "Answer the question using ONLY the numbered context below. "
+        "Do not use outside knowledge. Reply with the shortest exact answer "
+        "(a name, date, number or phrase) and nothing else. "
+        "If the context does not contain the answer, reply exactly: UNKNOWN\n\n"
+        f"Context:\n" + "\n".join(lines) + f"\n\nQuestion: {question}\nAnswer:"
+    )
+    answer = _reader_complete(reader, prompt, max_tokens=64)
+    if not answer or answer.strip().upper() == "UNKNOWN":
+        return None
+    return answer
+
+
+# Intent labels are a closed set; longmemeval/run.py compares against
+# "aggregation_count" directly, so the strings are part of the contract.
+_AGG_PAT = re.compile(r"\b(how many|how much|count|total|number of|sum of)\b", re.I)
+_TEMPORAL_PAT = re.compile(
+    r"\b(when|what date|what time|before|after|earlier|later|yesterday|today|"
+    r"last (week|month|year|night)|this (week|month|year)|ago|since|until|"
+    r"first|last|most recent|latest|previously)\b",
+    re.I,
+)
+_COMPARE_PAT = re.compile(r"\b(compare|difference|versus|vs\.?|more than|less than|between)\b", re.I)
+
+
+def classify_query_intent(query: str) -> str:
+    """
+    Route a question to a retrieval strategy.
+
+    Cheap and deterministic on purpose: an LLM call here would be a second
+    source of latency and non-determinism inside the thing being measured.
+    Order matters -- "how many times did X happen last week" is an aggregation
+    that also mentions time, and the wider aggregation lane is the one that
+    matters for recall.
+    """
+    q = query or ""
+    if _AGG_PAT.search(q):
+        return "aggregation_count"
+    if _TEMPORAL_PAT.search(q):
+        return "temporal"
+    if _COMPARE_PAT.search(q):
+        return "comparison"
+    return "fact_lookup"
+
+
+def retrieve_typed_lanes(
+    query: str,
+    *,
+    limit: int = 20,
+    source_agent_prefix: str | None = None,
+    intent: str | None = None,
+    expand_parents: bool = True,
+) -> tuple[list[dict], float]:
+    """
+    Retrieve for `query`, widening or narrowing by intent. Returns
+    (results, latency_seconds) to match retrieve().
+
+    "Typed lanes" means the intent decides how much is pulled and how it is
+    ordered, not that separate indexes are queried:
+
+      aggregation_count  needs recall over precision -- a count is wrong if one
+                         instance is missed -- so it pulls wider.
+      temporal           orders by recorded time where it is known, because the
+                         top semantic hit for "what did we do yesterday" is
+                         routinely a month old. Items with no timestamp keep
+                         their relevance order behind the dated ones rather
+                         than being dropped: 35% of the store has no usable
+                         time, and discarding a third of memory to sort the
+                         rest is a worse answer.
+      otherwise          plain relevance.
+    """
+    intent = intent or classify_query_intent(query)
+    effective_limit = limit
+    if intent == "aggregation_count":
+        effective_limit = max(limit, 50)
+    elif intent == "comparison":
+        effective_limit = max(limit, 30)
+
+    results, latency = retrieve(
+        query,
+        limit=effective_limit,
+        source_agent_prefix=source_agent_prefix,
+        use_full_pipeline=expand_parents,
+    )
+
+    if intent == "temporal" and results:
+        def _when(item: dict):
+            for key in ("last_confirmed", "first_seen", "created_at"):
+                v = item.get(key)
+                if v:
+                    return v
+            return None
+
+        dated = [r for r in results if _when(r) is not None]
+        undated = [r for r in results if _when(r) is None]
+        dated.sort(key=lambda r: str(_when(r)), reverse=True)
+        results = dated + undated
+
+    return results[:limit], latency
+
+
+class BenchmarkTraceWriter:
+    """
+    Per-question trace for a benchmark run, so a score can be explained rather
+    than only reported.
+
+    A benchmark that emits one aggregate number tells you it regressed but not
+    which questions or why. Each row keeps the retrieved ids alongside the
+    score, which is what makes a drop diagnosable after the fact.
+    """
+
+    def __init__(self, benchmark: str, *, run_label: str = "", trace_dir: Path | None = None):
+        self.benchmark = benchmark
+        self.run_label = run_label
+        self.rows: list[dict] = []
+        self.trace_dir = Path(trace_dir) if trace_dir else RESULTS_DIR / "traces"
+        self.started_at = datetime.now(timezone.utc)
+
+    def record(self, **fields: Any) -> dict:
+        """Store one question's trace and return it, so callers can embed it."""
+        retrieved = fields.pop("retrieved_items", None) or []
+        row = dict(fields)
+        row["retrieved_ids"] = [r.get("id") for r in retrieved][:20]
+        row["retrieved_count"] = len(retrieved)
+        row["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        self.rows.append(row)
+        return row
+
+    def summary(self) -> dict:
+        """Aggregate the trace and write it out. Safe to call more than once."""
+        scored = [r.get("f1") for r in self.rows if isinstance(r.get("f1"), (int, float))]
+        latencies = [r.get("latency") for r in self.rows if isinstance(r.get("latency"), (int, float))]
+        reader_used = sum(1 for r in self.rows if r.get("reader_used"))
+        out: dict[str, Any] = {
+            "benchmark": self.benchmark,
+            "run_label": self.run_label,
+            "questions": len(self.rows),
+            "reader_used": reader_used,
+            "f1_mean": (sum(scored) / len(scored)) if scored else 0.0,
+            "latency_mean": (sum(latencies) / len(latencies)) if latencies else 0.0,
+            "started_at": self.started_at.isoformat(),
+        }
+        try:
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
+            stamp = self.started_at.strftime("%Y%m%d_%H%M%S")
+            path = self.trace_dir / f"{self.benchmark}_{self.run_label or 'run'}_{stamp}.json"
+            with open(path, "w") as f:
+                json.dump({"summary": out, "rows": self.rows}, f, indent=2, default=str)
+            out["trace_path"] = str(path)
+        except Exception as e:  # a trace that cannot be written must not fail the run
+            LOGGER.warning("could not write trace: %s", e)
+        return out
