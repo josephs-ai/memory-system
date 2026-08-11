@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to config.json and set the paths for your machine. config.json itself is NOT tracked: it holds absolute local paths, and the six scripts that read it (chunk_memory, embed_memory, retrieve_memory, retrieve_memory_hybrid, retrieve_memory_hybrid_boosted, ensure_*) do not expand ${VAR} -- only heartbeat_memory_worker.py calls expandvars. A templated value would be taken literally as a directory name by the rest, which is why the previously-templated form could not have worked.",
+  "version": 1,
+  "sourceMemoryRoot": "/home/YOUR_USER/.openclaw/workspace",
+  "sourceFiles": [
+    "MEMORY.md",
+    "memory/browser.md",
+    "memory/preferences.md",
+    "memory/projects.md",
+    "memory/learned-fixes.md",
+    "memory/gateway.md",
+    "memory/worker.md"
+  ],
+  "sourceGlobs": [
+    "memory/daily/*.md",
+    "memory/projects/**/*.md"
+  ],
+  "chunkTargetWords": 100,
+  "chunkOverlapWords": 25,
+  "indexDb": "/home/YOUR_USER/.openclaw/workspace/.memory-index/memory.sqlite",
+  "chunksDir": "/home/YOUR_USER/.openclaw/workspace/.memory-index/chunks",
+  "embeddingsDir": "/home/YOUR_USER/.openclaw/workspace/.memory-index/embeddings",
+  "logsDir": "/home/YOUR_USER/.openclaw/workspace/.memory-index/logs"
+}

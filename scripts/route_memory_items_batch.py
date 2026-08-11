@@ -16,7 +16,7 @@ from memory_db import (
     upsert_discarded,
     upsert_memory_item,
     upsert_memory_items,
-    fetch_discarded_payloads,
+    fetch_rejected_matches,
     close_pool,
     POOL,
 )
@@ -89,21 +89,6 @@ def bulk_fetch_existing_ids(item_ids: list[str]) -> set[str]:
             )
             return {row[0] for row in cur.fetchall()}
 
-
-def build_rejected_index(discarded_payloads: list[dict]) -> tuple[set[str], set[tuple]]:
-    """Build fast lookup structures from discarded payloads for O(1) matching."""
-    text_set: set[str] = set()
-    slot_set: set[tuple] = set()
-    for old in discarded_payloads:
-        old_text = (old.get("text") or "").strip().lower()
-        if old_text:
-            text_set.add(old_text)
-        e, p, v, s = old.get("entity"), old.get("property"), old.get("value"), old.get("scope")
-        if e and p and v:
-            slot_set.add((e, p, v))
-            if s is not None:
-                slot_set.add((e, p, v, s))
-    return text_set, slot_set
 
 
 def fast_candidate_matches_rejected(item: dict, text_set: set[str], slot_set: set[tuple]) -> bool:
@@ -292,10 +277,9 @@ def main():
     all_ids = [item.get("id") for item in items if item.get("id")]
     existing_ids = bulk_fetch_existing_ids(all_ids)
 
-    # --- Phase 3: Prefetch discarded payloads once, build fast lookup ---
-    discarded_payloads = fetch_discarded_payloads()
-    rejected_text_set, rejected_slot_set = build_rejected_index(discarded_payloads)
-    del discarded_payloads  # free memory
+    # --- Phase 3: Probe only the rejected keys these items could match ---
+    # Previously fetched the entire memory_discarded table (millions of rows) here.
+    rejected_text_set, rejected_slot_set = fetch_rejected_matches(items)
 
     # --- Phase 4: Classify each item (no DB writes yet) ---
     log_buf: list[str] = []

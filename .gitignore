@@ -87,3 +87,6 @@ control_panel/templates/*_backup*
 # Python
 __pycache__/
 *.pyc
+
+# Local absolute paths; copy config.example.json and edit
+config.json

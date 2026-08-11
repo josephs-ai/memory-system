@@ -3,6 +3,7 @@ PostgreSQL database operations for memory items — CRUD, feedback tracking,
 retrieval logging, and schema management. Core data layer for the memory system.
 """
 import atexit
+import hashlib
 import os
 from pathlib import Path
 
@@ -619,41 +620,127 @@ def all_feedback_item_ids():
             return [row[0] for row in cur.fetchall()]
 
 def fetch_discarded_payloads():
+    """Load every discarded payload. Only safe on small tables -- see fetch_rejected_matches."""
     with POOL.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT payload FROM memory_discarded")
             return [row[0] for row in cur.fetchall()]
 
 
+def fetch_rejected_matches(items: list[dict]) -> tuple[set[str], set[tuple]]:
+    """
+    Return the discarded text/slot keys that match `items`, and nothing else.
+
+    memory_discarded grows without bound (millions of rows / GBs), so pulling the
+    whole table into Python to dedupe a handful of candidates is what made the
+    checkpoint pipeline allocate ~8GB and get killed on timeout. Probe only the
+    keys we actually care about.
+
+    NOTE: this filters in Postgres rather than in Python, which is the fix that
+    matters, but there is no index backing either predicate yet -- neither
+    memory_db_schema.sql nor any migration creates one on md5(lower(trim(text)))
+    or on (entity, property, value). These are sequential scans with a cheap
+    filter. Adding those two functional indexes is the remaining win; the
+    trim() above is written to match an index built the same way.
+    """
+    texts = sorted({t for t in ((i.get("text") or "").strip().lower() for i in items) if t})
+    slots = sorted(
+        {
+            (i["entity"], i["property"], i["value"])
+            for i in items
+            if i.get("entity") and i.get("property") and i.get("value")
+        }
+    )
+
+    text_set: set[str] = set()
+    slot_set: set[tuple] = set()
+    if not texts and not slots:
+        return text_set, slot_set
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            if texts:
+                digests = [hashlib.md5(t.encode("utf-8")).hexdigest() for t in texts]
+                cur.execute(
+                    """
+                    SELECT lower(trim(payload->>'text'))
+                    FROM memory_discarded
+                    WHERE md5(lower(trim(payload->>'text'))) = ANY(%s)
+                    """,
+                    (digests,),
+                )
+                # Re-check in Python: md5 collisions are absurdly unlikely, but the
+                # index is on the digest, so the digest match alone is not proof.
+                wanted = set(texts)
+                text_set = {row[0] for row in cur.fetchall() if row[0] in wanted}
+
+            if slots:
+                cur.execute(
+                    """
+                    SELECT payload->>'entity', payload->>'property',
+                           payload->>'value', payload->>'scope'
+                    FROM memory_discarded
+                    WHERE (payload->>'entity', payload->>'property', payload->>'value')
+                          IN (SELECT * FROM unnest(%s::text[], %s::text[], %s::text[]))
+                    """,
+                    ([s[0] for s in slots], [s[1] for s in slots], [s[2] for s in slots]),
+                )
+                for entity, prop, value, scope in cur.fetchall():
+                    slot_set.add((entity, prop, value))
+                    if scope is not None:
+                        slot_set.add((entity, prop, value, scope))
+
+    return text_set, slot_set
+
+
 def candidate_matches_rejected(item: dict) -> tuple[bool, dict | None]:
+    """
+    Single-item variant of fetch_rejected_matches. Probes by index rather than
+    scanning memory_discarded (millions of rows) once per candidate.
+
+    Match is on trim()+lower() of the stored text, mirroring the .strip().lower()
+    applied to the candidate. Comparing a stripped candidate against an unstripped
+    stored value silently dropped any row saved with a trailing newline, so a
+    previously-rejected item could re-route to AUTO/INBOX. An exact lowercase text match, or an exact
+    (entity, property, value) slot match, counts as previously rejected. The old
+    `same_scope_slot` term was strictly narrower than `exact_slot` -- it could
+    only be true when exact_slot already was -- so it never changed the result.
+    """
     text = (item.get("text") or "").strip().lower()
     entity = item.get("entity")
     prop = item.get("property")
     value = item.get("value")
-    scope = item.get("scope")
 
-    for old in fetch_discarded_payloads():
-        old_text = (old.get("text") or "").strip().lower()
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            if text:
+                cur.execute(
+                    """
+                    SELECT payload FROM memory_discarded
+                    WHERE md5(lower(trim(payload->>'text'))) = %s
+                      AND lower(trim(payload->>'text')) = %s
+                    LIMIT 1
+                    """,
+                    (hashlib.md5(text.encode("utf-8")).hexdigest(), text),
+                )
+                row = cur.fetchone()
+                if row:
+                    return True, row[0]
 
-        exact_slot = (
-            entity
-            and prop
-            and value
-            and old.get("entity") == entity
-            and old.get("property") == prop
-            and old.get("value") == value
-        )
-
-        exact_text = text and old_text and text == old_text
-
-        same_scope_slot = (
-            exact_slot
-            and scope is not None
-            and old.get("scope") == scope
-        )
-
-        if exact_text or exact_slot or same_scope_slot:
-            return True, old
+            if entity and prop and value:
+                cur.execute(
+                    """
+                    SELECT payload FROM memory_discarded
+                    WHERE payload->>'entity' = %s
+                      AND payload->>'property' = %s
+                      AND payload->>'value' = %s
+                    LIMIT 1
+                    """,
+                    (entity, prop, value),
+                )
+                row = cur.fetchone()
+                if row:
+                    return True, row[0]
 
     return False, None
 def low_utility_feedback_rows(min_bad: int = 1):
