@@ -990,7 +990,25 @@ def hybrid_search_memory_items(
     allowed_sensitivities: list[str] | None = None,
     limit: int = 20,
     source_agent_prefix: str | None = None,
+    after_ts=None,
+    before_ts=None,
+    half_life_days: float = 30.0,
+    recency_weight: float = 0.6,
 ):
+    """
+    after_ts / before_ts hard-filter by event time; recency_* tune the decay.
+
+    The filter and the decay do different jobs and both are needed. "What did we
+    do yesterday" carries a window, and a window has to be a FILTER: any additive
+    recency term still loses to fts_rank * 3.0 on an old document that repeats
+    the query words, which is why "phase 4 yesterday" kept returning months-old
+    phase-4 docs. The decay handles the untimed general case, where nothing in
+    the question says when.
+
+    Rows with no event time are never excluded by a window. ~35% of the store has
+    no usable timestamp, and silently dropping a third of memory whenever a
+    question mentions a date would trade one wrong answer for a worse one.
+    """
     allowed_sensitivities = list(allowed_sensitivities or ["public"])
 
     sql = """
@@ -1091,7 +1109,34 @@ def hybrid_search_memory_items(
                     )
                 ) AS structured_bonus,
 
-                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus
+                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus,
+
+                -- Best available event time. created_at is insert time and is
+                -- fully populated but bulk-stamped; first_seen/last_confirmed
+                -- are truer but NULL on roughly a third of rows. Prefer those and
+                -- fall back, so an item is dated whenever anything knows when.
+                COALESCE(m.last_confirmed, m.first_seen, m.created_at) AS event_at,
+
+                -- Half-life decay, NOT a linear bonus. The old ranking had no
+                -- time term at all, so a strong keyword match from March always
+                -- beat a good match from yesterday -- exactly the "phase 4"
+                -- failure, where fts_rank * 3.0 on an old doc that repeats the
+                -- phrase outranks the recent one that answers the question.
+                --
+                -- Undated rows score 0 here rather than being penalised or
+                -- dropped: they keep their relevance ranking and simply gain
+                -- nothing, which is the honest treatment of "we do not know
+                -- when this happened".
+                CASE
+                    WHEN COALESCE(m.last_confirmed, m.first_seen, m.created_at) IS NULL THEN 0.0
+                    ELSE EXP(
+                        -LN(2) *
+                        GREATEST(
+                            EXTRACT(EPOCH FROM (now() - COALESCE(m.last_confirmed, m.first_seen, m.created_at))) / 86400.0,
+                            0
+                        ) / %s
+                    )
+                END AS recency_score
 
             FROM memory_items m
             JOIN memory_item_embeddings e ON e.memory_id = m.id
@@ -1099,6 +1144,17 @@ def hybrid_search_memory_items(
             WHERE m.status = %s
               AND m.sensitivity = ANY(%s)
               AND (%s::boolean IS FALSE OR m.source_agent LIKE %s)
+              -- Undated rows survive the window on purpose (see docstring).
+              AND (
+                  %s::timestamptz IS NULL
+                  OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) IS NULL
+                  OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) >= %s::timestamptz
+              )
+              AND (
+                  %s::timestamptz IS NULL
+                  OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) IS NULL
+                  OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) <= %s::timestamptz
+              )
         ),
         ranked AS (
             SELECT
@@ -1108,6 +1164,12 @@ def hybrid_search_memory_items(
                     + (vector_score * 1.1)
                     + structured_bonus
                     + importance_bonus
+                    -- Weighted to break ties and lift genuinely recent matches
+                    -- without letting a fresh irrelevant note outrank an old
+                    -- exact answer. Recency is a tiebreaker, not a filter; a
+                    -- question with a time window in it should be filtered
+                    -- (see after_ts/before_ts), not merely nudged.
+                    + (recency_score * %s)
                 ) AS final_score
             FROM scored
         )
@@ -1131,13 +1193,25 @@ def hybrid_search_memory_items(
             cur.execute(
                 sql,
                 (
+                    # Order follows the placeholders as they appear in the SQL
+                    # TEXT, not their logical grouping: the recency CASE lives in
+                    # the `scored` SELECT list, so half_life binds before the
+                    # WHERE-clause parameters, and recency_weight binds later in
+                    # `ranked`. Getting this wrong bound the sensitivity array to
+                    # a float and failed with "ANY requires array on right side".
                     query_text,
                     query_text,
                     vec,
+                    max(float(half_life_days), 0.5),
                     status,
                     allowed_sensitivities,
                     sa_filter,
                     sa_like,
+                    after_ts,
+                    after_ts,
+                    before_ts,
+                    before_ts,
+                    float(recency_weight),
                     limit,
                 ),
             )
