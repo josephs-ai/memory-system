@@ -80,9 +80,9 @@ Transcript chunk:
 """
 
 
-def stable_candidate_id(*parts: str) -> str:
+def stable_candidate_id(*parts: str, prefix: str = "qwen_") -> str:
     payload = "\u241f".join(part or "" for part in parts)
-    return "qwen_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return prefix + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
 def strip_json_noise(text: str) -> str:
@@ -172,7 +172,12 @@ def normalize_item(
     source_session: str,
     source_chunk: str,
     index: int,
+    extractor: str = "qwen",
+    extractor_model: str | None = None,
+    id_prefix: str = "qwen_",
 ) -> StructuredMemoryCandidate | None:
+    """extractor/extractor_model/id_prefix let a second backend reuse this
+    validation without claiming to be Qwen in the stored provenance."""
     claim_text = coerce_str(item.get("claim_text") or item.get("text") or item.get("raw_text"))
     if not claim_text:
         return None
@@ -191,11 +196,11 @@ def normalize_item(
         scope_id=scope_id,
         scope_type=scope_type,
         scope_confidence=coerce_confidence(item.get("scope_confidence", item.get("extractor_confidence", 0.5))),
-        raw={"extractor": "qwen", "model": DEFAULT_MODEL},
+        raw={"extractor": extractor, "model": extractor_model or DEFAULT_MODEL},
     )
 
     candidate = StructuredMemoryCandidate(
-        candidate_id=stable_candidate_id(source_agent, source_session, source_chunk, str(index), claim_text),
+        candidate_id=stable_candidate_id(source_agent, source_session, source_chunk, str(index), claim_text, prefix=id_prefix),
         source_agent=source_agent,
         source_session=source_session,
         source_chunk=source_chunk,
@@ -210,7 +215,7 @@ def normalize_item(
         impact_level=ImpactLevel(impact),
         requires_approval=True,
         extractor_confidence=coerce_confidence(item.get("extractor_confidence")),
-        normalization_notes=["extracted_by_qwen_ollama_optional_mode"],
+        normalization_notes=[f"extracted_by_{extractor}_optional_mode"],
     )
     return validate_candidate(candidate)
 

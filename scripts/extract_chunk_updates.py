@@ -18,6 +18,7 @@ SCRIPTS_DIR = WORKSPACE / ".memory-index" / "scripts"
 
 EXTRACT_SCRIPT = SCRIPTS_DIR / "extract_updates.py"
 QWEN_EXTRACT_SCRIPT = SCRIPTS_DIR / "extract_updates_qwen.py"
+CLAUDE_EXTRACT_SCRIPT = SCRIPTS_DIR / "extract_updates_claude.py"
 GENERATE_SCRIPT = SCRIPTS_DIR / "generate_memory_candidates.py"
 FILTER_SCRIPT = SCRIPTS_DIR / "filter_memory_candidates.py"
 JUDGE_SCRIPT = SCRIPTS_DIR / "judge_memory_candidates.py"
@@ -222,6 +223,40 @@ def put_cached_items(cache: dict, key: str, sig: dict, items: list[dict]):
 
 
 
+def run_claude_extract(
+    chunk_file: Path,
+    *,
+    source_agent: str,
+    source_session: str,
+    model: str = "",
+) -> list[dict]:
+    """Claude extraction mode (opt-in only, never default).
+
+    Billed to the Anthropic API key, not a Claude subscription -- setup-token
+    credentials are issued for Claude Code and are rejected from other clients.
+    """
+    cmd = [
+        "python3",
+        str(CLAUDE_EXTRACT_SCRIPT),
+        str(chunk_file),
+        "--source-agent", source_agent,
+        "--source-session", source_session,
+        "--source-chunk", chunk_file.name,
+    ]
+    if model:
+        cmd += ["--model", model]
+    try:
+        extracted = run_stage(cmd)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or str(exc)).strip()
+        print(json.dumps({"chunk": chunk_file.name, "claude_error": err}), file=sys.stderr)
+        return []
+    except Exception as exc:
+        print(json.dumps({"chunk": chunk_file.name, "claude_error": str(exc)}), file=sys.stderr)
+        return []
+    return load_jsonl_text(extracted)
+
+
 def run_qwen_extract(
     chunk_file: Path,
     *,
@@ -326,12 +361,13 @@ def main():
     # "hybrid" — structural first, then Qwen; results merged and deduped
     parser.add_argument(
         "--extraction-mode",
-        choices=["structural", "qwen", "hybrid"],
+        choices=["structural", "claude", "qwen", "hybrid"],
         default="structural",
-        help="structural (default) | qwen (Ollama opt-in) | hybrid (both, deduped)",
+        help="structural (default) | claude (Anthropic API opt-in) | qwen (Ollama opt-in) | hybrid (both, deduped)",
     )
     parser.add_argument("--ollama-url", default="", help="Override Ollama URL for qwen/hybrid modes")
     parser.add_argument("--qwen-model", default="", help="Override Qwen model name")
+    parser.add_argument("--claude-model", default="", help="Override Claude model (default claude-haiku-4-5)")
     args = parser.parse_args()
 
     chunk_dir = Path(args.chunk_dir)
@@ -392,6 +428,13 @@ def main():
                         chunk_file,
                         source_agent=args.source_agent,
                         source_session=args.source_session,
+                    )
+                elif args.extraction_mode == "claude":
+                    items = run_claude_extract(
+                        chunk_file,
+                        source_agent=args.source_agent,
+                        source_session=args.source_session,
+                        model=args.claude_model,
                     )
                 elif args.extraction_mode == "qwen":
                     items = run_qwen_extract(
