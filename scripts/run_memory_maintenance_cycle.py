@@ -66,8 +66,37 @@ def file_signature(path: Path):
     }
 
 
+def inbox_signature():
+    """Depth and high-water mark of the Postgres inbox queue.
+
+    WATCH_FILES dates from when routing wrote review/*.jsonl. Routing now
+    queues into memory_inbox instead, so those files are frozen and the
+    change gate below concluded "nothing happened" on every run -- which
+    silently starved auto-promotion while the queue grew to six figures.
+    Anything that decides whether promotion runs has to look where the
+    items actually are.
+    """
+    try:
+        import sys as _sys
+
+        _sys.path.insert(0, str(SCRIPTS_DIR))
+        from memory_db import get_conn
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*), max(queued_at) FROM memory_inbox")
+                count, newest = cur.fetchone()
+        return {"count": count, "newest": str(newest)}
+    except Exception as exc:
+        # A DB hiccup must not wedge the cycle closed; fall back to a value
+        # that never compares equal so the cycle runs rather than skips.
+        return {"error": f"{exc.__class__.__name__}", "at": now_iso()}
+
+
 def current_state():
-    return {str(path): file_signature(path) for path in WATCH_FILES}
+    state = {str(path): file_signature(path) for path in WATCH_FILES}
+    state["db:memory_inbox"] = inbox_signature()
+    return state
 
 
 def load_previous_state():

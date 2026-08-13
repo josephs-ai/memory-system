@@ -1,8 +1,0 @@
-{
-  "pid": 94744,
-  "started_at": 1773334701,
-  "python": "/home/joseph-ding/.openclaw/venvs/memory-db/bin/python",
-  "worker_script": "/home/joseph-ding/.openclaw/workspace/.memory-index/scripts/heartbeat_memory_worker.py",
-  "log_file": "/home/joseph-ding/.openclaw/workspace/.memory-index/heartbeat_worker.log",
-  "env_file_used": "/home/joseph-ding/.openclaw/workspace/.memory-index/.env"
-}

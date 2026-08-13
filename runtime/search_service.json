@@ -1,8 +1,0 @@
-{
-  "pid": 98539,
-  "started_at": 1773338835.93,
-  "port": 8791,
-  "embed_model": "sentence-transformers/all-MiniLM-L6-v2",
-  "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-  "python": "3.13.7 (main, Mar  3 2026, 12:19:54) [GCC 15.2.0]"
-}

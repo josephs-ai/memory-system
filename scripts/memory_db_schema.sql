@@ -124,3 +124,36 @@ CREATE TABLE IF NOT EXISTS project_locks (
     created_ts DOUBLE PRECISION,
     pid INTEGER
 );
+
+-- Episodic lane.
+--
+-- memory_items answers "what is true" -- semantic facts, deduped by
+-- (memory_type, entity, property, value). That dedup is correct for facts and
+-- exactly wrong for activity: re-doing work yesterday re-asserts facts already
+-- known, so the work collapses into existing rows and leaves no trace. Asking a
+-- fact store "what did we do yesterday" therefore returns months-old rows that
+-- merely share vocabulary.
+--
+-- This table answers "what happened, and when". It is append-only and is never
+-- deduplicated on content: two identical days of work are two episodes. Time is
+-- a hard filter here rather than a decay weight, because the question is a
+-- window, not a similarity.
+CREATE TABLE IF NOT EXISTS memory_episodes (
+    id BIGSERIAL PRIMARY KEY,
+    agent TEXT NOT NULL,
+    source_session TEXT,
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    summary TEXT NOT NULL,
+    artifacts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    origin TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS memory_episodes_started_idx
+    ON memory_episodes (started_at DESC);
+CREATE INDEX IF NOT EXISTS memory_episodes_agent_started_idx
+    ON memory_episodes (agent, started_at DESC);
+CREATE INDEX IF NOT EXISTS memory_episodes_summary_fts_idx
+    ON memory_episodes USING GIN (to_tsvector('english', summary));

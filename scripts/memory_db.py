@@ -1109,8 +1109,21 @@ def hybrid_search_memory_items(
     allowed_sensitivities: list[str] | None = None,
     limit: int = 20,
     source_agent_prefix: str | None = None,
+    after_ts=None,
+    before_ts=None,
+    half_life_days: float = 30.0,
+    recency_weight: float = 0.6,
 ):
+    """after_ts / before_ts hard-filter by event time; recency_* tune the decay.
+
+    A window is a filter, not a ranking hint: asked for yesterday, a row from
+    March is not a worse answer, it is not an answer. The decay constants are
+    formatted into the SQL rather than bound, because they sit in the SELECT
+    list ahead of the WHERE and binding them there silently shifts every later
+    placeholder by one.
+    """
     allowed_sensitivities = list(allowed_sensitivities or ["public"])
+    half_life_days = max(float(half_life_days), 0.0001)
 
     sql = """
         WITH q AS (
@@ -1210,7 +1223,19 @@ def hybrid_search_memory_items(
                     )
                 ) AS structured_bonus,
 
-                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus
+                COALESCE(0.8, 0.75) * 0.25 AS importance_bonus,
+
+                COALESCE(m.last_confirmed, m.first_seen, m.created_at) AS event_at,
+                CASE
+                    WHEN COALESCE(m.last_confirmed, m.first_seen, m.created_at) IS NULL
+                    THEN 0.0
+                    ELSE EXP(
+                        -LN(2) * GREATEST(
+                            EXTRACT(EPOCH FROM (now() - COALESCE(m.last_confirmed, m.first_seen, m.created_at))) / 86400.0,
+                            0
+                        ) / {half_life}
+                    )
+                END AS recency_score
 
             FROM memory_items m
             JOIN memory_item_embeddings e ON e.memory_id = m.id
@@ -1218,6 +1243,10 @@ def hybrid_search_memory_items(
             WHERE m.status = %s
               AND m.sensitivity = ANY(%s)
               AND (%s::boolean IS FALSE OR m.source_agent LIKE %s)
+              AND (%s::timestamptz IS NULL
+                   OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) >= %s::timestamptz)
+              AND (%s::timestamptz IS NULL
+                   OR COALESCE(m.last_confirmed, m.first_seen, m.created_at) < %s::timestamptz)
         ),
         ranked AS (
             SELECT
@@ -1227,6 +1256,7 @@ def hybrid_search_memory_items(
                     + (vector_score * 1.1)
                     + structured_bonus
                     + importance_bonus
+                    + (recency_score * {recency_w})
                 ) AS final_score
             FROM scored
         )
@@ -1240,6 +1270,9 @@ def hybrid_search_memory_items(
             id
         LIMIT %s
     """
+
+    sql = sql.format(half_life=repr(float(half_life_days)),
+                     recency_w=repr(float(recency_weight)))
 
     vec = "[" + ",".join(str(float(x)) for x in query_embedding) + "]"
 
@@ -1257,6 +1290,8 @@ def hybrid_search_memory_items(
                     allowed_sensitivities,
                     sa_filter,
                     sa_like,
+                    after_ts, after_ts,
+                    before_ts, before_ts,
                     limit,
                 ),
             )
@@ -1284,3 +1319,112 @@ def count_memory_items():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM memory_items")
             return cur.fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Episodic lane
+#
+# The semantic store answers "what is true"; these answer "what happened, when".
+# Kept deliberately separate: episodes are append-only and never deduped on
+# content, which is the property that makes a time-window query work at all.
+# ---------------------------------------------------------------------------
+
+def record_episode(
+    *,
+    agent: str,
+    summary: str,
+    started_at,
+    ended_at=None,
+    source_session: str | None = None,
+    artifacts: dict | None = None,
+    item_count: int = 0,
+    origin: str | None = None,
+) -> int:
+    """Append one episode. Never updates an existing row -- repetition is signal."""
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_episodes
+                    (agent, source_session, started_at, ended_at,
+                     summary, artifacts, item_count, origin)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    agent,
+                    source_session,
+                    started_at,
+                    ended_at,
+                    summary,
+                    Jsonb(artifacts or {}),
+                    item_count,
+                    origin,
+                ),
+            )
+            episode_id = cur.fetchone()[0]
+        conn.commit()
+    return episode_id
+
+
+def search_episodes(
+    *,
+    after_ts=None,
+    before_ts=None,
+    query_text: str | None = None,
+    agent: str | None = None,
+    limit: int = 20,
+):
+    """Activity in a time window, newest first.
+
+    Time is a hard filter, not a ranking weight. "What did we do yesterday"
+    is a question about a window: an episode from March is not a worse answer,
+    it is not an answer. Text, when given, narrows within the window rather
+    than competing with it -- which is what stopped "phase 4 yesterday" from
+    returning months-old rows that merely contain "phase 4".
+    """
+    where = ["TRUE"]
+    params: list = []
+    if after_ts is not None:
+        where.append("started_at >= %s")
+        params.append(after_ts)
+    if before_ts is not None:
+        where.append("started_at < %s")
+        params.append(before_ts)
+    if agent:
+        where.append("agent = %s")
+        params.append(agent)
+    if query_text:
+        where.append(
+            "to_tsvector('english', summary) @@ plainto_tsquery('english', %s)"
+        )
+        params.append(query_text)
+    params.append(limit)
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, agent, source_session, started_at, ended_at,
+                       summary, artifacts, item_count, origin
+                  FROM memory_episodes
+                 WHERE {' AND '.join(where)}
+                 ORDER BY started_at DESC
+                 LIMIT %s
+                """,
+                params,
+            )
+            return [
+                {
+                    "id": r[0],
+                    "agent": r[1],
+                    "source_session": r[2],
+                    "started_at": r[3],
+                    "ended_at": r[4],
+                    "summary": r[5],
+                    "artifacts": r[6],
+                    "item_count": r[7],
+                    "origin": r[8],
+                }
+                for r in cur.fetchall()
+            ]
