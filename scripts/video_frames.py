@@ -22,7 +22,6 @@ import argparse
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 # Playwright also ships an ffmpeg, but its build decodes only mjpeg and libvpx

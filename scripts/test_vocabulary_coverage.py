@@ -150,7 +150,6 @@ def test_opaque_digests_are_flagged():
 
 
 def test_validation_gate_records_the_noise_reasons():
-    from memory_candidate_schema import StructuredMemoryCandidate
     import inspect
     # Only assert the shared helper is wired in; constructing a full candidate
     # requires the whole schema and is covered by test_structural_extractor.
