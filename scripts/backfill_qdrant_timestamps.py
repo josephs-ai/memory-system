@@ -24,7 +24,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import psycopg
-from qdrant_client.http import models
 
 from vector_store_qdrant import (
     EFFECTIVE_TS_FIELD,

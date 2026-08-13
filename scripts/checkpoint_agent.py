@@ -548,7 +548,7 @@ def checkpoint_transcript(args, transcript: Path) -> None:
         try:
             new_cursor = build_cursor(transcript, processed_offset=current_stat["size"])
         except FileNotFoundError:
-            print(f"[S1] Transcript moved/deleted after processing; using pre-processing stat for cursor.")
+            print("[S1] Transcript moved/deleted after processing; using pre-processing stat for cursor.")
             new_cursor = {
                 "cursor_version": CURSOR_VERSION,
                 "path": str(transcript),

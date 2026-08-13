@@ -13,11 +13,8 @@ Regression tests for two memory-loss bugs:
    find_pending_transcripts_for_agent includes recent rotated files that still
    have bytes past their cursor.
 """
-import importlib
-import json
 import os
 import time
-from pathlib import Path
 
 import route_memory_items_batch as R
 

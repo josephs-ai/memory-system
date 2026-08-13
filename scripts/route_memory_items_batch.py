@@ -7,7 +7,7 @@ import os
 import argparse
 from functools import lru_cache
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 # --- Re-entry tuning (env-overridable) ---------------------------------------
 # How long a discard suppresses a matching re-extraction. After this window a
@@ -29,7 +29,6 @@ from memory_db import (
     upsert_discarded,
     upsert_memory_item,
     upsert_memory_items,
-    fetch_discarded_payloads,
     check_rejected_texts_sql,
     check_rejected_slots_sql,
     close_pool,

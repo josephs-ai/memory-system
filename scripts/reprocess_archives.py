@@ -11,8 +11,6 @@ Usage:
     python3 reprocess_archives.py [--max-files N] [--max-total-seconds N]
 """
 import argparse
-import json
-import os
 import subprocess
 import sys
 import time
@@ -159,7 +157,7 @@ def main():
                 dest = PROCESSED_DIR / archive.name
                 archive.rename(dest)
                 processed += 1
-                print(f"  Done. Moved to processed/")
+                print("  Done. Moved to processed/")
         except subprocess.TimeoutExpired:
             print(f"  TIMEOUT after {args.per_file_timeout}s — skipping.")
             failed += 1

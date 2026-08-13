@@ -3,7 +3,6 @@ PostgreSQL database operations for memory items — CRUD, feedback tracking,
 retrieval logging, and schema management. Core data layer for the memory system.
 """
 import atexit
-import os
 from pathlib import Path
 
 from psycopg.types.json import Jsonb
