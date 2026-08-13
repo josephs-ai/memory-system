@@ -81,12 +81,20 @@ def _run_text_search(session, *, query: str, limit: int, project_id: str | None,
         ORDER BY m.confidence DESC, m.importance DESC, m.id ASC
         LIMIT $limit
         """,
-        query=query,
-        limit=limit,
-        project_id=project_id,
-        subproject_id=subproject_id,
-        workflow_id=workflow_id,
-        pipeline_id=pipeline_id,
+        # Passed as an explicit parameters dict, not as keyword arguments.
+        # Session.run()'s own first parameter is named "query", so a Cypher
+        # parameter of the same name collided with it:
+        #   TypeError: Session.run() got multiple values for argument 'query'
+        # That made every graph-backed search fail while the DB and vector
+        # sources still returned results, so the service looked healthy.
+        parameters={
+            "query": query,
+            "limit": limit,
+            "project_id": project_id,
+            "subproject_id": subproject_id,
+            "workflow_id": workflow_id,
+            "pipeline_id": pipeline_id,
+        },
     )
 
 

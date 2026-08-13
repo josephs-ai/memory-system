@@ -4,6 +4,7 @@ and memory relationships.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -71,7 +72,9 @@ def prepare_graph_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "scope_type": scope_fields.get("scope_type"),
         "inheritance_policy": scope_fields.get("inheritance_policy"),
         "scope_confidence": float(scope_fields.get("scope_confidence") or 0.0),
-        "scope_payload": dict(scope_fields),
+        # Neo4j properties must be primitives or arrays of primitives; a map is
+        # rejected outright, so the full scope record is stored as JSON text.
+        "scope_payload": json.dumps(dict(scope_fields), sort_keys=True, default=str),
     }
 
 

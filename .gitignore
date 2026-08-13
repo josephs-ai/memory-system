@@ -90,3 +90,25 @@ __pycache__/
 
 # Local absolute paths; copy config.example.json and edit
 config.json
+
+# Working data that must never reach the repo.
+# A `git add -A` here would otherwise stage ~5,700 files including a 356 MB
+# embeddings dump.
+.trash/
+backups/
+backfill/
+*.tsv.gz
+*.err
+*.out
+
+# Live process state: pids and ports change every restart, so tracking them
+# produces a diff on every boot and merge conflicts between machines.
+runtime/*.pid
+runtime/*.json
+
+# Per-agent cursor position: which byte of which transcript was last processed.
+# Machine-local and rewritten constantly (a single backfill rewound 28 of them),
+# so tracking new ones just adds churn. Files already tracked stay tracked.
+state/*.json
+state/*.lock
+state/cursors/

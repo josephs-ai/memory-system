@@ -194,6 +194,12 @@ def run_pipeline_and_sync(env: dict[str, str]) -> dict[str, Any]:
             "name": "sync_neo4j",
             "cmd": [py, str(SCRIPTS_DIR / "sync_memory_to_neo4j.py")],
         },
+        {
+            # Keeps the episodic lane current. Idempotent on origin, so running
+            # it every cycle only appends checkpoints recorded since last time.
+            "name": "record_episodes",
+            "cmd": [py, str(SCRIPTS_DIR / "backfill_episodes.py")],
+        },
     ]
 
     summary: dict[str, Any] = {"steps": [], "ok": True}

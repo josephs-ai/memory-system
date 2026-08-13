@@ -37,13 +37,20 @@ def main():
     parser.add_argument("--status", default="active")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", choices=["cpu", "cuda"])
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Re-embed every item, not just new/changed ones (e.g. after a model change).",
+    )
     args = parser.parse_args()
 
     device = choose_device(args.device)
     model = SentenceTransformer(MODEL_NAME, device=device)
     ensure_qdrant_collection()
 
-    items = fetch_memory_items_for_embedding(args.status)
+    items = fetch_memory_items_for_embedding(
+        args.status, only_missing=not args.all, model_name=MODEL_NAME
+    )
 
     if not items:
         print("NONE")

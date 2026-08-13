@@ -916,11 +916,48 @@ def upsert_memory_embedding(memory_id: str, model_name: str, embedding: list[flo
         conn.commit()
 
 
-def fetch_memory_items_for_embedding(status: str = "active"):
+def fetch_memory_items_for_embedding(
+    status: str = "active",
+    only_missing: bool = False,
+    model_name: str | None = None,
+    updated_since=None,
+):
+    """Fetch items for embedding.
+
+    With only_missing=True, returns just the items that actually need work:
+    those with no embedding for `model_name`, plus those whose text has been
+    edited since it was last embedded. Callers that want every item regardless
+    (the Neo4j sync) keep the default.
+
+    This matters more than it looks. The heartbeat pipeline runs this every 90
+    seconds; fetching all ~29k active items made each cycle a ~35-minute
+    full re-embed, so the worker was permanently saturated and never caught up.
+    """
+    if only_missing:
+        # The model_name placeholder sits in the JOIN, which the planner reads
+        # before the WHERE, so it must be bound first.
+        join = (
+            "LEFT JOIN memory_item_embeddings e "
+            "ON e.memory_id = m.id AND e.model_name = %s"
+        )
+        # No embedding yet, or the text changed after it was last embedded.
+        extra = "AND (e.memory_id IS NULL OR e.updated_at < m.updated_at)"
+        params: tuple = (model_name, status)
+    else:
+        join, extra = "", ""
+        params = (status,)
+
+    if updated_since is not None:
+        # Inclusive so a watermark taken from max(updated_at) re-sends its own
+        # boundary row rather than skipping anything written in the same tick.
+        # Consumers upsert, so the small overlap is free.
+        extra += " AND m.updated_at >= %s"
+        params = params + (updated_since,)
+
     with POOL.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     id,
                     text,
@@ -944,12 +981,15 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     freshness_class,
                     source_agent,
                     source_session,
-                    source_chunk
-                FROM memory_items
-                WHERE status = %s
+                    source_chunk,
+                    m.updated_at
+                FROM memory_items m
+                {join}
+                WHERE m.status = %s
+                {extra}
                 ORDER BY id
                 """,
-                (status,),
+                params,
             )
 
             rows = cur.fetchall()
@@ -978,6 +1018,7 @@ def fetch_memory_items_for_embedding(status: str = "active"):
                     "source_agent": row[20],
                     "source_session": row[21],
                     "source_chunk": row[22],
+                    "updated_at": row[23],
                 }
                 for row in rows
             ]
@@ -1239,3 +1280,112 @@ def count_memory_items():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM memory_items")
             return cur.fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Episodic lane
+#
+# The semantic store answers "what is true"; these answer "what happened, when".
+# Kept deliberately separate: episodes are append-only and never deduped on
+# content, which is the property that makes a time-window query work at all.
+# ---------------------------------------------------------------------------
+
+def record_episode(
+    *,
+    agent: str,
+    summary: str,
+    started_at,
+    ended_at=None,
+    source_session: str | None = None,
+    artifacts: dict | None = None,
+    item_count: int = 0,
+    origin: str | None = None,
+) -> int:
+    """Append one episode. Never updates an existing row -- repetition is signal."""
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_episodes
+                    (agent, source_session, started_at, ended_at,
+                     summary, artifacts, item_count, origin)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    agent,
+                    source_session,
+                    started_at,
+                    ended_at,
+                    summary,
+                    Jsonb(artifacts or {}),
+                    item_count,
+                    origin,
+                ),
+            )
+            episode_id = cur.fetchone()[0]
+        conn.commit()
+    return episode_id
+
+
+def search_episodes(
+    *,
+    after_ts=None,
+    before_ts=None,
+    query_text: str | None = None,
+    agent: str | None = None,
+    limit: int = 20,
+):
+    """Activity in a time window, newest first.
+
+    Time is a hard filter, not a ranking weight. "What did we do yesterday"
+    is a question about a window: an episode from March is not a worse answer,
+    it is not an answer. Text, when given, narrows within the window rather
+    than competing with it -- which is what stopped "phase 4 yesterday" from
+    returning months-old rows that merely contain "phase 4".
+    """
+    where = ["TRUE"]
+    params: list = []
+    if after_ts is not None:
+        where.append("started_at >= %s")
+        params.append(after_ts)
+    if before_ts is not None:
+        where.append("started_at < %s")
+        params.append(before_ts)
+    if agent:
+        where.append("agent = %s")
+        params.append(agent)
+    if query_text:
+        where.append(
+            "to_tsvector('english', summary) @@ plainto_tsquery('english', %s)"
+        )
+        params.append(query_text)
+    params.append(limit)
+
+    with POOL.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, agent, source_session, started_at, ended_at,
+                       summary, artifacts, item_count, origin
+                  FROM memory_episodes
+                 WHERE {' AND '.join(where)}
+                 ORDER BY started_at DESC
+                 LIMIT %s
+                """,
+                params,
+            )
+            return [
+                {
+                    "id": r[0],
+                    "agent": r[1],
+                    "source_session": r[2],
+                    "started_at": r[3],
+                    "ended_at": r[4],
+                    "summary": r[5],
+                    "artifacts": r[6],
+                    "item_count": r[7],
+                    "origin": r[8],
+                }
+                for r in cur.fetchall()
+            ]

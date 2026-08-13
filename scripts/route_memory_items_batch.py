@@ -223,6 +223,27 @@ def decide_route(item: dict) -> tuple[str, str]:
     return judge_route, judge_reason
 
 
+# Score contributed when a value is absent from the maps below. Any real
+# vocabulary value that falls through to this is a bug: durable_eligible did
+# exactly that for months, scoring the most valuable items at 0.5 and pinning
+# importance below the promotion gate so nothing could ever be promoted.
+# test_vocabulary_coverage.py asserts these maps stay in step with the enums.
+UNKNOWN_SCORE = 0.5
+
+DURABILITY_SCORES = {
+    "durable_eligible": 0.9,
+    "candidate": 0.6,
+    "review_required": 0.5,  # explicitly mid: needs review, must not auto-promote
+    "session": 0.2,
+    "ephemeral": 0.2,
+    # Older vocabulary, kept so previously-scored items stay comparable.
+    "durable": 0.9,
+    "stable": 0.8,
+}
+
+IMPACT_SCORES = {"critical": 0.95, "high": 0.85, "medium": 0.65, "low": 0.4}
+
+
 def normalize_item(item: dict) -> dict:
     """Normalize schema drift between extraction output and routing expectations."""
     # 1. id: extraction produces candidate_id, routing expects id
@@ -235,10 +256,8 @@ def normalize_item(item: dict) -> dict:
     if item.get("importance") is None:
         durability = (item.get("durability_class") or "").lower()
         impact = (item.get("impact_level") or "").lower()
-        dur_map = {"durable": 0.9, "stable": 0.8, "candidate": 0.6, "ephemeral": 0.2}
-        imp_map = {"critical": 0.95, "high": 0.85, "medium": 0.65, "low": 0.4}
-        dur_score = dur_map.get(durability, 0.5)
-        imp_score = imp_map.get(impact, 0.5)
+        dur_score = DURABILITY_SCORES.get(durability, UNKNOWN_SCORE)
+        imp_score = IMPACT_SCORES.get(impact, UNKNOWN_SCORE)
         item["importance"] = round((dur_score + imp_score) / 2.0, 3)
     # 4. scope: extraction uses scope_envelope.scope_type, routing expects flat scope
     if item.get("scope") is None:
